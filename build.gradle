@@ -29,10 +29,12 @@ buildscript {
     classpath 'gradle.plugin.com.github.jengelman.gradle.plugins:shadow:7.0.0'
     classpath 'com.palantir.baseline:gradle-baseline-java:4.0.0'
     classpath 'com.palantir.gradle.gitversion:gradle-git-version:0.12.3'
-    classpath 'com.diffplug.spotless:spotless-plugin-gradle:5.14.1'
+    classpath 'com.diffplug.spotless:spotless-plugin-gradle:6.2.2'
     classpath 'gradle.plugin.org.inferred:gradle-processors:3.3.0'
     classpath 'me.champeau.jmh:jmh-gradle-plugin:0.6.6'
     classpath "com.github.alisiikh:gradle-scalastyle-plugin:3.4.1"
+    classpath 'com.palantir.gradle.revapi:gradle-revapi:1.7.0'
+    classpath 'com.gorylenko.gradle-git-properties:gradle-git-properties:2.4.1'
   }
 }
 
@@ -41,7 +43,7 @@ plugins {
 }
 
 try {
-  // apply this plugin in a try-catch block so that we can handle cases without .git directory
+  // apply these plugins in a try-catch block so that we can handle cases without .git directory
   apply plugin: 'com.palantir.git-version'
 } catch (Exception e) {
   project.logger.error(e.getMessage())
@@ -52,7 +54,29 @@ if (JavaVersion.current() == JavaVersion.VERSION_1_8) {
 } else if (JavaVersion.current() == JavaVersion.VERSION_11) {
   project.ext.jdkVersion = '11'
 } else {
-  throw new GradleException("This build must be run with JDK 8 or 11")
+  throw new GradleException("This build must be run with JDK 8 or 11 but was executed with JDK " + JavaVersion.current())
+}
+
+apply plugin: 'com.gorylenko.gradle-git-properties'
+// git properties file for the root project for adding to the source tarball
+gitProperties {
+  gitPropertiesName = 'iceberg-build.properties'
+  gitPropertiesResourceDir = file("${rootDir}/build")
+  extProperty = 'gitProps'
+  failOnNoGitDirectory = true
+}
+generateGitProperties.outputs.upToDateWhen { false }
+
+if (file("${rootDir}/iceberg-build.properties").exists()) {
+  tasks.register('buildInfo', Exec) {
+    project.logger.info('Using build info from iceberg-build.properties')
+    commandLine 'cp', "${rootDir}/iceberg-build.properties", 'build/iceberg-build.properties'
+  }
+} else {
+  tasks.register('buildInfo') {
+    project.logger.info('Generating iceberg-build.properties from git')
+    dependsOn generateGitProperties
+  }
 }
 
 dependencyRecommendations {
@@ -119,6 +143,7 @@ subprojects {
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.slf4j:slf4j-simple'
     testImplementation 'org.mockito:mockito-core'
+    testImplementation 'org.mockito:mockito-inline'
     testImplementation 'org.assertj:assertj-core'
   }
 
@@ -139,6 +164,8 @@ subprojects {
         buildLog << testOutputEvent.destination << " " << testOutputEvent.message
       }
     })
+
+    maxHeapSize = "1500m"
 
     testLogging {
       events "failed"
@@ -189,10 +216,22 @@ project(':iceberg-bundled-guava') {
 }
 
 project(':iceberg-api') {
+  apply plugin: 'com.palantir.revapi'
+
   dependencies {
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
     compileOnly "com.google.errorprone:error_prone_annotations"
     testImplementation "org.apache.avro:avro"
+  }
+
+  tasks.processTestResources.dependsOn rootProject.tasks.buildInfo
+
+  sourceSets {
+    test {
+      resources {
+        srcDir "${rootDir}/build"
+      }
+    }
   }
 }
 
@@ -203,6 +242,9 @@ project(':iceberg-common') {
 }
 
 project(':iceberg-core') {
+  test {
+    useJUnitPlatform()
+  }
   dependencies {
     api project(':iceberg-api')
     implementation project(':iceberg-common')
@@ -212,6 +254,8 @@ project(':iceberg-core') {
       exclude group: 'org.tukaani' // xz compression is not supported
     }
 
+    implementation 'io.airlift:aircompressor'
+    implementation 'org.apache.httpcomponents.client5:httpclient5'
     implementation "com.fasterxml.jackson.core:jackson-databind"
     implementation "com.fasterxml.jackson.core:jackson-core"
     implementation "com.github.ben-manes.caffeine:caffeine"
@@ -221,6 +265,8 @@ project(':iceberg-core') {
       exclude group: 'org.slf4j', module: 'slf4j-log4j12'
     }
 
+    testImplementation 'org.mock-server:mockserver-netty'
+    testImplementation 'org.mock-server:mockserver-client-java'
     testImplementation "org.xerial:sqlite-jdbc"
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
   }
@@ -312,11 +358,13 @@ project(':iceberg-aws') {
     implementation project(':iceberg-core')
 
     compileOnly 'software.amazon.awssdk:url-connection-client'
+    compileOnly 'software.amazon.awssdk:apache-client'
     compileOnly 'software.amazon.awssdk:s3'
     compileOnly 'software.amazon.awssdk:kms'
     compileOnly 'software.amazon.awssdk:glue'
     compileOnly 'software.amazon.awssdk:sts'
     compileOnly 'software.amazon.awssdk:dynamodb'
+    compileOnly 'software.amazon.awssdk:lakeformation'
 
     compileOnly("org.apache.hadoop:hadoop-common") {
       exclude group: 'org.apache.avro', module: 'avro'
@@ -326,6 +374,7 @@ project(':iceberg-aws') {
     }
 
     testImplementation 'software.amazon.awssdk:iam'
+    testImplementation 'software.amazon.awssdk:s3control'
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
     testImplementation("com.adobe.testing:s3mock-junit4") {
       exclude module: "spring-boot-starter-logging"
@@ -365,7 +414,6 @@ project(':iceberg-gcp') {
     implementation 'com.google.cloud:google-cloud-storage'
 
     testImplementation 'com.google.cloud:google-cloud-nio'
-    testImplementation 'org.assertj:assertj-core'
 
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
 
@@ -450,6 +498,7 @@ project(':iceberg-orc') {
   dependencies {
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
     api project(':iceberg-api')
+    implementation project(':iceberg-common')
     implementation project(':iceberg-core')
     implementation("org.apache.avro:avro") {
       exclude group: 'org.tukaani' // xz compression is not supported
@@ -473,6 +522,7 @@ project(':iceberg-orc') {
     }
 
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testImplementation project(':iceberg-common')
   }
 }
 
@@ -572,19 +622,40 @@ project(':iceberg-nessie') {
 
   dependencies {
     api project(':iceberg-api')
+    implementation project(':iceberg-common')
     implementation project(':iceberg-core')
     implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
     implementation "org.projectnessie:nessie-client"
+    implementation "com.fasterxml.jackson.core:jackson-databind"
+    implementation "com.fasterxml.jackson.core:jackson-core"
 
     testImplementation "org.projectnessie:nessie-jaxrs-testextension"
     // Need to "pull in" el-api explicitly :(
     testImplementation "jakarta.el:jakarta.el-api"
-    testImplementation 'org.assertj:assertj-core'
 
     compileOnly "org.apache.hadoop:hadoop-common"
     testImplementation "org.apache.avro:avro"
 
     testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testImplementation project(path: ':iceberg-core', configuration: 'testArtifacts')
+
+    // Only there to prevent "warning: unknown enum constant SchemaType.OBJECT" compile messages
+    compileOnly "org.eclipse.microprofile.openapi:microprofile-openapi-api:3.0"
+    testCompileOnly "org.eclipse.microprofile.openapi:microprofile-openapi-api:3.0"
+  }
+}
+
+project(':iceberg-dell') {
+  dependencies {
+    implementation project(':iceberg-core')
+    implementation project(':iceberg-common')
+    implementation project(path: ':iceberg-bundled-guava', configuration: 'shadow')
+    compileOnly 'com.emc.ecs:object-client-bundle'
+
+    testImplementation project(path: ':iceberg-api', configuration: 'testArtifacts')
+    testImplementation "javax.xml.bind:jaxb-api"
+    testImplementation "javax.activation:activation"
+    testImplementation "org.glassfish.jaxb:jaxb-runtime"
   }
 }
 

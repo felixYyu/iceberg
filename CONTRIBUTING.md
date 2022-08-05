@@ -41,13 +41,16 @@ Pull requests are the preferred mechanism for contributing to Iceberg
 Please refer to the [Building](https://github.com/apache/iceberg#building) section of the main readme for instructions
 on how to build iceberg locally.
 
+## Website and Documentation Updates
+
+The [Iceberg website](https://iceberg.apache.org/) and documentations are hosted in a different repository [iceberg-docs](https://github.com/apache/iceberg-docs).
+Read the repository README for contribution guidelines for the website and documentation.
+
 ## Style
 
 For Java styling, check out the section
 [Setting up IDE and Code Style](https://iceberg.apache.org/community/#setting-up-ide-and-code-style) from the
 documentation site.
-
-For Python, please use the tox command `tox -e format` to apply autoformatting to the project.
 
 ### Java style guidelines
 
@@ -100,7 +103,7 @@ Avoid boolean arguments to methods that are not `private` to avoid confusing inv
 ```java
   // prefer exposing suppressFailure in method names
   public void sendMessageIgnoreFailure() {
-    doSomethingInternal(true);
+    sendMessageInternal(true);
   }
 
   public void sendMessage() {

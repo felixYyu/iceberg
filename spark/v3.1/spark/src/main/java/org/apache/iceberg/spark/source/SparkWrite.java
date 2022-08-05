@@ -37,13 +37,12 @@ import org.apache.iceberg.PartitionKey;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.ReplacePartitions;
 import org.apache.iceberg.Schema;
-import org.apache.iceberg.SerializableTable;
 import org.apache.iceberg.Snapshot;
 import org.apache.iceberg.SnapshotSummary;
 import org.apache.iceberg.SnapshotUpdate;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
-import org.apache.iceberg.encryption.EncryptedOutputFile;
+import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.ClusteredDataWriter;
@@ -57,12 +56,16 @@ import org.apache.iceberg.io.RollingDataWriter;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.spark.CommitMetadata;
 import org.apache.iceberg.spark.FileRewriteCoordinator;
 import org.apache.iceberg.spark.SparkWriteConf;
 import org.apache.iceberg.util.PropertyUtil;
 import org.apache.iceberg.util.Tasks;
+import org.apache.spark.TaskContext;
+import org.apache.spark.TaskContext$;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
+import org.apache.spark.executor.OutputMetrics;
 import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.connector.write.BatchWrite;
@@ -102,6 +105,8 @@ class SparkWrite {
   private final StructType dsSchema;
   private final Map<String, String> extraSnapshotMetadata;
   private final boolean partitionedFanoutEnabled;
+
+  private boolean cleanupOnAbort = true;
 
   SparkWrite(SparkSession spark, Table table, SparkWriteConf writeConf,
              LogicalWriteInfo writeInfo, String applicationId,
@@ -155,7 +160,7 @@ class SparkWrite {
   // the writer factory works for both batch and streaming
   private WriterFactory createWriterFactory() {
     // broadcast the table metadata as the writer factory will be sent to executors
-    Broadcast<Table> tableBroadcast = sparkContext.broadcast(SerializableTable.copyOf(table));
+    Broadcast<Table> tableBroadcast = sparkContext.broadcast(SerializableTableWithSize.copyOf(table));
     return new WriterFactory(tableBroadcast, format, targetFileSize, writeSchema, dsSchema, partitionedFanoutEnabled);
   }
 
@@ -169,6 +174,10 @@ class SparkWrite {
       extraSnapshotMetadata.forEach(operation::set);
     }
 
+    if (!CommitMetadata.commitProperties().isEmpty()) {
+      CommitMetadata.commitProperties().forEach(operation::set);
+    }
+
     if (isWapTable() && wapId != null) {
       // write-audit-publish is enabled for this table and job
       // stage the changes without changing the current snapshot
@@ -176,25 +185,34 @@ class SparkWrite {
       operation.stageOnly();
     }
 
-    long start = System.currentTimeMillis();
-    operation.commit(); // abort is automatically called if this fails
-    long duration = System.currentTimeMillis() - start;
-    LOG.info("Committed in {} ms", duration);
+    try {
+      long start = System.currentTimeMillis();
+      operation.commit(); // abort is automatically called if this fails
+      long duration = System.currentTimeMillis() - start;
+      LOG.info("Committed in {} ms", duration);
+    } catch (CommitStateUnknownException commitStateUnknownException) {
+      cleanupOnAbort = false;
+      throw commitStateUnknownException;
+    }
   }
 
   private void abort(WriterCommitMessage[] messages) {
-    Map<String, String> props = table.properties();
-    Tasks.foreach(files(messages))
-        .retry(PropertyUtil.propertyAsInt(props, COMMIT_NUM_RETRIES, COMMIT_NUM_RETRIES_DEFAULT))
-        .exponentialBackoff(
-            PropertyUtil.propertyAsInt(props, COMMIT_MIN_RETRY_WAIT_MS, COMMIT_MIN_RETRY_WAIT_MS_DEFAULT),
-            PropertyUtil.propertyAsInt(props, COMMIT_MAX_RETRY_WAIT_MS, COMMIT_MAX_RETRY_WAIT_MS_DEFAULT),
-            PropertyUtil.propertyAsInt(props, COMMIT_TOTAL_RETRY_TIME_MS, COMMIT_TOTAL_RETRY_TIME_MS_DEFAULT),
-            2.0 /* exponential */)
-        .throwFailureWhenFinished()
-        .run(file -> {
-          table.io().deleteFile(file.path().toString());
-        });
+    if (cleanupOnAbort) {
+      Map<String, String> props = table.properties();
+      Tasks.foreach(files(messages))
+          .retry(PropertyUtil.propertyAsInt(props, COMMIT_NUM_RETRIES, COMMIT_NUM_RETRIES_DEFAULT))
+          .exponentialBackoff(
+              PropertyUtil.propertyAsInt(props, COMMIT_MIN_RETRY_WAIT_MS, COMMIT_MIN_RETRY_WAIT_MS_DEFAULT),
+              PropertyUtil.propertyAsInt(props, COMMIT_MAX_RETRY_WAIT_MS, COMMIT_MAX_RETRY_WAIT_MS_DEFAULT),
+              PropertyUtil.propertyAsInt(props, COMMIT_TOTAL_RETRY_TIME_MS, COMMIT_TOTAL_RETRY_TIME_MS_DEFAULT),
+              2.0 /* exponential */)
+          .throwFailureWhenFinished()
+          .run(file -> {
+            table.io().deleteFile(file.path().toString());
+          });
+    } else {
+      LOG.warn("Skipping cleaning up of data files because Iceberg was unable to determine the final commit state");
+    }
   }
 
   private Iterable<DataFile> files(WriterCommitMessage[] messages) {
@@ -497,6 +515,24 @@ class SparkWrite {
       this.taskFiles = taskFiles;
     }
 
+    // Reports bytesWritten and recordsWritten to the Spark output metrics.
+    // Can only be called in executor.
+    void reportOutputMetrics() {
+      long bytesWritten = 0L;
+      long recordsWritten = 0L;
+      for (DataFile dataFile : taskFiles) {
+        bytesWritten += dataFile.fileSizeInBytes();
+        recordsWritten += dataFile.recordCount();
+      }
+
+      TaskContext taskContext = TaskContext$.MODULE$.get();
+      if (taskContext != null) {
+        OutputMetrics outputMetrics = taskContext.taskMetrics().outputMetrics();
+        outputMetrics.setBytesWritten(bytesWritten);
+        outputMetrics.setRecordsWritten(recordsWritten);
+      }
+    }
+
     DataFile[] files() {
       return taskFiles;
     }
@@ -541,12 +577,11 @@ class SparkWrite {
           .build();
 
       if (spec.isUnpartitioned()) {
-        return new UnpartitionedDataWriter(writerFactory, fileFactory, io, spec, format, targetFileSize);
+        return new UnpartitionedDataWriter(writerFactory, fileFactory, io, spec, targetFileSize);
 
       } else {
         return new PartitionedDataWriter(
-            writerFactory, fileFactory, io, spec, writeSchema, dsSchema,
-            format, targetFileSize, partitionedFanoutEnabled);
+            writerFactory, fileFactory, io, spec, writeSchema, dsSchema, targetFileSize, partitionedFanoutEnabled);
       }
     }
   }
@@ -563,14 +598,8 @@ class SparkWrite {
     private final FileIO io;
 
     private UnpartitionedDataWriter(SparkFileWriterFactory writerFactory, OutputFileFactory fileFactory,
-                                    FileIO io, PartitionSpec spec, FileFormat format, long targetFileSize) {
-      // TODO: support ORC rolling writers
-      if (format == FileFormat.ORC) {
-        EncryptedOutputFile outputFile = fileFactory.newOutputFile();
-        delegate = writerFactory.newDataWriter(outputFile, spec, null);
-      } else {
-        delegate = new RollingDataWriter<>(writerFactory, fileFactory, io, targetFileSize, spec, null);
-      }
+                                    FileIO io, PartitionSpec spec, long targetFileSize) {
+      this.delegate = new RollingDataWriter<>(writerFactory, fileFactory, io, targetFileSize, spec, null);
       this.io = io;
     }
 
@@ -584,7 +613,9 @@ class SparkWrite {
       close();
 
       DataWriteResult result = delegate.result();
-      return new TaskCommit(result.dataFiles().toArray(new DataFile[0]));
+      TaskCommit taskCommit =  new TaskCommit(result.dataFiles().toArray(new DataFile[0]));
+      taskCommit.reportOutputMetrics();
+      return taskCommit;
     }
 
     @Override
@@ -610,12 +641,11 @@ class SparkWrite {
 
     private PartitionedDataWriter(SparkFileWriterFactory writerFactory, OutputFileFactory fileFactory,
                                   FileIO io, PartitionSpec spec, Schema dataSchema,
-                                  StructType dataSparkType, FileFormat format,
-                                  long targetFileSize, boolean fanoutEnabled) {
+                                  StructType dataSparkType, long targetFileSize, boolean fanoutEnabled) {
       if (fanoutEnabled) {
-        this.delegate = new FanoutDataWriter<>(writerFactory, fileFactory, io, format, targetFileSize);
+        this.delegate = new FanoutDataWriter<>(writerFactory, fileFactory, io, targetFileSize);
       } else {
-        this.delegate = new ClusteredDataWriter<>(writerFactory, fileFactory, io, format, targetFileSize);
+        this.delegate = new ClusteredDataWriter<>(writerFactory, fileFactory, io, targetFileSize);
       }
       this.io = io;
       this.spec = spec;
@@ -634,7 +664,9 @@ class SparkWrite {
       close();
 
       DataWriteResult result = delegate.result();
-      return new TaskCommit(result.dataFiles().toArray(new DataFile[0]));
+      TaskCommit taskCommit =  new TaskCommit(result.dataFiles().toArray(new DataFile[0]));
+      taskCommit.reportOutputMetrics();
+      return taskCommit;
     }
 
     @Override

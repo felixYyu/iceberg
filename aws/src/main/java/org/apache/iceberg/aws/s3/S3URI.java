@@ -19,14 +19,18 @@
 
 package org.apache.iceberg.aws.s3;
 
+import java.util.Map;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 
 /**
  * This class represents a fully qualified location in S3 for input/output
- * operations expressed as as URI.  This implementation is provided to
+ * operations expressed as as URI. This implementation is provided to
  * ensure compatibility with Hadoop Path implementations that may introduce
  * encoding issues with native URI implementation.
+ * If the bucket in the location has an access point in the mapping, the
+ * access point is used to perform all the S3 operations.
  *
  * Note: Path-style access is deprecated and not supported by this
  * implementation.
@@ -38,6 +42,7 @@ class S3URI {
   private static final String FRAGMENT_DELIM = "#";
 
   private final String location;
+  private final String scheme;
   private final String bucket;
   private final String key;
 
@@ -50,16 +55,32 @@ class S3URI {
    * @param location fully qualified URI
    */
   S3URI(String location) {
+    this(location, ImmutableMap.of());
+  }
+
+  /**
+   * Creates a new S3URI in the form of scheme://(bucket|accessPoint)/key?query#fragment with additional information
+   * on accessPoints.
+   * <p>
+   * The URI supports any valid URI schemes to be backwards compatible with s3a and s3n,
+   * and also allows users to use S3FileIO with other S3-compatible object storage services like GCS.
+   *
+   * @param location fully qualified URI
+   * @param bucketToAccessPointMapping contains mapping of bucket to access point
+   */
+  S3URI(String location, Map<String, String> bucketToAccessPointMapping) {
     Preconditions.checkNotNull(location, "Location cannot be null.");
 
     this.location = location;
     String [] schemeSplit = location.split(SCHEME_DELIM, -1);
     ValidationException.check(schemeSplit.length == 2, "Invalid S3 URI, cannot determine scheme: %s", location);
+    this.scheme = schemeSplit[0];
 
     String [] authoritySplit = schemeSplit[1].split(PATH_DELIM, 2);
     ValidationException.check(authoritySplit.length == 2, "Invalid S3 URI, cannot determine bucket: %s", location);
     ValidationException.check(!authoritySplit[1].trim().isEmpty(), "Invalid S3 URI, path is empty: %s", location);
-    this.bucket = authoritySplit[0];
+    this.bucket = bucketToAccessPointMapping == null ? authoritySplit[0] : bucketToAccessPointMapping.getOrDefault(
+        authoritySplit[0], authoritySplit[0]);
 
     // Strip query and fragment if they exist
     String path = authoritySplit[1];
@@ -87,6 +108,15 @@ class S3URI {
    */
   public String location() {
     return location;
+  }
+
+  /**
+   * Returns the original scheme provided in the location.
+   *
+   * @return uri scheme
+   */
+  public String scheme() {
+    return scheme;
   }
 
   @Override

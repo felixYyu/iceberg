@@ -286,11 +286,19 @@ public class ParquetUtil {
         int truncateLength = truncateMode.length();
         switch (type.typeId()) {
           case STRING:
-            upperBounds.put(id, UnicodeUtil.truncateStringMax((Literal<CharSequence>) max, truncateLength));
+            Literal<CharSequence> truncatedMaxString = UnicodeUtil.truncateStringMax((Literal<CharSequence>) max,
+                truncateLength);
+            if (truncatedMaxString != null) {
+              upperBounds.put(id, truncatedMaxString);
+            }
             break;
           case FIXED:
           case BINARY:
-            upperBounds.put(id, BinaryUtil.truncateBinaryMax((Literal<ByteBuffer>) max, truncateLength));
+            Literal<ByteBuffer> truncatedMaxBinary = BinaryUtil.truncateBinaryMax((Literal<ByteBuffer>) max,
+                truncateLength);
+            if (truncatedMaxBinary != null) {
+              upperBounds.put(id, truncatedMaxBinary);
+            }
             break;
           default:
             upperBounds.put(id, max);
@@ -334,6 +342,10 @@ public class ParquetUtil {
       // page encoding stats
       return true;
     }
+  }
+
+  public static boolean hasNoBloomFilterPages(ColumnChunkMetaData meta) {
+    return meta.getBloomFilterOffset() <= 0;
   }
 
   public static Dictionary readDictionary(ColumnDescriptor desc, PageReader pageSource) {

@@ -17,13 +17,13 @@
   - under the License.
   -->
 
-![](site/docs/img/Iceberg-logo.png)
+![Iceberg](https://iceberg.apache.org/docs/latest/img/Iceberg-logo.png)
 
 [![](https://github.com/apache/iceberg/actions/workflows/java-ci.yml/badge.svg)](https://github.com/apache/iceberg/actions/workflows/java-ci.yml)
 [![](https://github.com/apache/iceberg/actions/workflows/python-ci.yml/badge.svg)](https://github.com/apache/iceberg/actions/workflows/python-ci.yml)
 [![Slack](https://img.shields.io/badge/chat-on%20Slack-brightgreen.svg)](https://apache-iceberg.slack.com/)
 
-Apache Iceberg is a new table format for storing large, slow-moving tabular data. It is designed to improve on the de-facto standard table layout built into Hive, Trino, and Spark.
+Iceberg is a high-performance format for huge analytic tables. Iceberg brings the reliability and simplicity of SQL tables to big data, while making it possible for engines like Spark, Trino, Flink, Presto, Hive and Impala to safely work with the same tables, at the same time.
 
 Background and documentation is available at <https://iceberg.apache.org>
 
@@ -77,13 +77,7 @@ This project Iceberg also has modules for adding Iceberg support to processing e
 * `iceberg-mr` contains an InputFormat and other classes for integrating with Apache Hive
 * `iceberg-pig` is an implementation of Pig's LoadFunc API for Iceberg
 
-### Compatibility
+### Engine Compatibility
 
-Iceberg's Spark integration is compatible with Spark 2.4 and Spark 3.0 using the modules in the following table:
-
-| Iceberg version | Spark 2.4.x   | Spark 3.0.x    |
-| --------------- | ------------- | -------------- |
-| master branch   | spark-runtime | spark3-runtime |
-| 0.9.0           | spark-runtime | spark3-runtime |
-| 0.8.0           | spark-runtime |                |
-
+See the [Multi-Engine Support](https://iceberg.apache.org/multi-engine-support/) page to know about Iceberg compatibility with different Spark, Flink and Hive versions.
+For other engines such as Presto or Trino, please visit their websites for Iceberg integration details.

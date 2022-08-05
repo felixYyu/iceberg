@@ -33,6 +33,7 @@ import org.apache.iceberg.hive.HiveCatalog;
 import org.apache.iceberg.hive.TestHiveMetastore;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.assertj.core.api.Assertions;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.ClassRule;
@@ -63,7 +64,7 @@ public abstract class FlinkTestBase extends TestBaseUtils {
   }
 
   @AfterClass
-  public static void stopMetastore() {
+  public static void stopMetastore() throws Exception {
     metastore.stop();
     FlinkTestBase.catalog = null;
   }
@@ -102,5 +103,18 @@ public abstract class FlinkTestBase extends TestBaseUtils {
     } catch (Exception e) {
       throw new RuntimeException("Failed to collect table result", e);
     }
+  }
+
+  protected void assertSameElements(Iterable<Row> expected, Iterable<Row> actual) {
+    Assertions.assertThat(actual)
+        .isNotNull()
+        .containsExactlyInAnyOrderElementsOf(expected);
+  }
+
+  protected void assertSameElements(String message, Iterable<Row> expected, Iterable<Row> actual) {
+    Assertions.assertThat(actual)
+        .isNotNull()
+        .as(message)
+        .containsExactlyInAnyOrderElementsOf(expected);
   }
 }

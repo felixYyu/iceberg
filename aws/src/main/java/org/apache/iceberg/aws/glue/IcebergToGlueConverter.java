@@ -19,25 +19,29 @@
 
 package org.apache.iceberg.aws.glue;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import org.apache.iceberg.PartitionField;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.common.DynMethods;
 import org.apache.iceberg.exceptions.NoSuchNamespaceException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Type;
-import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.types.Types.NestedField;
 import org.slf4j.Logger;
@@ -58,17 +62,21 @@ class IcebergToGlueConverter {
   private static final Pattern GLUE_TABLE_PATTERN = Pattern.compile("^[a-z0-9_]{1,255}$");
   public static final String GLUE_DB_LOCATION_KEY = "location";
   public static final String GLUE_DB_DESCRIPTION_KEY = "comment";
-  public static final String ICEBERG_FIELD_USAGE = "iceberg.field.usage";
-  public static final String ICEBERG_FIELD_TYPE_TYPE_ID = "iceberg.field.type.typeid";
-  public static final String ICEBERG_FIELD_TYPE_STRING = "iceberg.field.type.string";
   public static final String ICEBERG_FIELD_ID = "iceberg.field.id";
   public static final String ICEBERG_FIELD_OPTIONAL = "iceberg.field.optional";
-  public static final String ICEBERG_PARTITION_TRANSFORM = "iceberg.partition.transform";
-  public static final String ICEBERG_PARTITION_FIELD_ID = "iceberg.partition.field-id";
-  public static final String ICEBERG_PARTITION_SOURCE_ID = "iceberg.partition.source-id";
-  public static final String SCHEMA_COLUMN = "schema-column";
-  public static final String SCHEMA_SUBFIELD = "schema-subfield";
-  public static final String PARTITION_FIELD = "partition-field";
+  public static final String ICEBERG_FIELD_CURRENT = "iceberg.field.current";
+  private static final List<String> ADDITIONAL_LOCATION_PROPERTIES = ImmutableList.of(
+      TableProperties.WRITE_DATA_LOCATION,
+      TableProperties.WRITE_METADATA_LOCATION,
+      TableProperties.OBJECT_STORE_PATH,
+      TableProperties.WRITE_FOLDER_STORAGE_LOCATION
+  );
+
+  // Attempt to set additionalLocations if available on the given AWS SDK version
+  private static final DynMethods.UnboundMethod SET_ADDITIONAL_LOCATIONS = DynMethods.builder("additionalLocations")
+      .hiddenImpl("software.amazon.awssdk.services.glue.model.StorageDescriptor$Builder", Collection.class)
+      .orNoop()
+      .build();
 
   /**
    * A Glue database name cannot be longer than 252 characters.
@@ -97,31 +105,41 @@ class IcebergToGlueConverter {
 
   /**
    * Validate and convert Iceberg namespace to Glue database name
-   * @param namespace Iceberg namespace
+   *
+   * @param namespace                Iceberg namespace
+   * @param skipNameValidation should skip name validation
    * @return database name
    */
-  static String toDatabaseName(Namespace namespace) {
-    validateNamespace(namespace);
+  static String toDatabaseName(Namespace namespace, boolean skipNameValidation) {
+    if (!skipNameValidation) {
+      validateNamespace(namespace);
+    }
+
     return namespace.level(0);
   }
 
   /**
    * Validate and get Glue database name from Iceberg TableIdentifier
-   * @param tableIdentifier Iceberg table identifier
+   *
+   * @param tableIdentifier          Iceberg table identifier
+   * @param skipNameValidation should skip name validation
    * @return database name
    */
-  static String getDatabaseName(TableIdentifier tableIdentifier) {
-    return toDatabaseName(tableIdentifier.namespace());
+  static String getDatabaseName(TableIdentifier tableIdentifier, boolean skipNameValidation) {
+    return toDatabaseName(tableIdentifier.namespace(), skipNameValidation);
   }
 
   /**
    * Validate and convert Iceberg name to Glue DatabaseInput
-   * @param namespace Iceberg namespace
-   * @param metadata metadata map
+   *
+   * @param namespace                Iceberg namespace
+   * @param metadata                 metadata map
+   * @param skipNameValidation should skip name validation
    * @return Glue DatabaseInput
    */
-  static DatabaseInput toDatabaseInput(Namespace namespace, Map<String, String> metadata) {
-    DatabaseInput.Builder builder = DatabaseInput.builder().name(toDatabaseName(namespace));
+  static DatabaseInput toDatabaseInput(Namespace namespace, Map<String, String> metadata, boolean skipNameValidation) {
+    DatabaseInput.Builder builder = DatabaseInput.builder().name(toDatabaseName(namespace,
+        skipNameValidation));
     Map<String, String> parameters = Maps.newHashMap();
     metadata.forEach((k, v) -> {
       if (GLUE_DB_DESCRIPTION_KEY.equals(k)) {
@@ -159,11 +177,16 @@ class IcebergToGlueConverter {
 
   /**
    * Validate and get Glue table name from Iceberg TableIdentifier
-   * @param tableIdentifier table identifier
+   *
+   * @param tableIdentifier    table identifier
+   * @param skipNameValidation  should skip name validation
    * @return table name
    */
-  static String getTableName(TableIdentifier tableIdentifier) {
-    validateTableName(tableIdentifier.name());
+  static String getTableName(TableIdentifier tableIdentifier, boolean skipNameValidation) {
+    if (!skipNameValidation) {
+      validateTableName(tableIdentifier.name());
+    }
+
     return tableIdentifier.name();
   }
 
@@ -188,8 +211,17 @@ class IcebergToGlueConverter {
    */
   static void setTableInputInformation(TableInput.Builder tableInputBuilder, TableMetadata metadata) {
     try {
+      StorageDescriptor.Builder storageDescriptor = StorageDescriptor.builder();
+      if (!SET_ADDITIONAL_LOCATIONS.isNoop()) {
+        SET_ADDITIONAL_LOCATIONS.invoke(storageDescriptor,
+            ADDITIONAL_LOCATION_PROPERTIES.stream()
+            .map(metadata.properties()::get)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toSet()));
+      }
+
       tableInputBuilder
-          .storageDescriptor(StorageDescriptor.builder()
+          .storageDescriptor(storageDescriptor
               .location(metadata.location())
               .columns(toColumns(metadata))
               .build());
@@ -252,59 +284,37 @@ class IcebergToGlueConverter {
 
   private static List<Column> toColumns(TableMetadata metadata) {
     List<Column> columns = Lists.newArrayList();
-    Set<NestedField> rootColumnSet = Sets.newHashSet();
-    // Add schema-column fields
+    Set<String> addedNames = Sets.newHashSet();
+
     for (NestedField field : metadata.schema().columns()) {
-      rootColumnSet.add(field);
+      addColumnWithDedupe(columns, addedNames, field, true /* is current */);
+    }
+
+    for (Schema schema : metadata.schemas()) {
+      if (schema.schemaId() != metadata.currentSchemaId()) {
+        for (NestedField field : schema.columns()) {
+          addColumnWithDedupe(columns, addedNames, field, false /* is not current */);
+        }
+      }
+    }
+
+    return columns;
+  }
+
+  private static void addColumnWithDedupe(List<Column> columns, Set<String> dedupe,
+                                          NestedField field, boolean isCurrent) {
+    if (!dedupe.contains(field.name())) {
       columns.add(Column.builder()
           .name(field.name())
           .type(toTypeString(field.type()))
           .comment(field.doc())
-          .parameters(convertToParameters(SCHEMA_COLUMN, field))
+          .parameters(ImmutableMap.of(
+              ICEBERG_FIELD_ID, Integer.toString(field.fieldId()),
+              ICEBERG_FIELD_OPTIONAL, Boolean.toString(field.isOptional()),
+              ICEBERG_FIELD_CURRENT, Boolean.toString(isCurrent)
+          ))
           .build());
+      dedupe.add(field.name());
     }
-    // Add schema-subfield
-    for (NestedField field : TypeUtil.indexById(metadata.schema().asStruct()).values()) {
-      if (!rootColumnSet.contains(field)) {
-        columns.add(Column.builder()
-            .name(field.name())
-            .type(toTypeString(field.type()))
-            .comment(field.doc())
-            .parameters(convertToParameters(SCHEMA_SUBFIELD, field))
-            .build());
-      }
-    }
-    // Add partition-field
-    for (PartitionField partitionField : metadata.spec().fields()) {
-      Type type = partitionField.transform()
-          .getResultType(metadata.schema().findField(partitionField.sourceId()).type());
-      columns.add(Column.builder()
-          .name(partitionField.name())
-          .type(toTypeString(type))
-          .parameters(convertToPartitionFieldParameters(type, partitionField))
-          .build());
-    }
-    return columns;
-  }
-
-  private static Map<String, String> convertToParameters(String fieldUsage, NestedField field) {
-    return ImmutableMap.of(ICEBERG_FIELD_USAGE, fieldUsage,
-        ICEBERG_FIELD_TYPE_TYPE_ID, field.type().typeId().toString(),
-        ICEBERG_FIELD_TYPE_STRING, toTypeString(field.type()),
-        ICEBERG_FIELD_ID, Integer.toString(field.fieldId()),
-        ICEBERG_FIELD_OPTIONAL, Boolean.toString(field.isOptional())
-    );
-  }
-
-  private static Map<String, String> convertToPartitionFieldParameters(Type type, PartitionField partitionField) {
-    return ImmutableMap.<String, String>builder()
-        .put(ICEBERG_FIELD_USAGE, PARTITION_FIELD)
-        .put(ICEBERG_FIELD_TYPE_TYPE_ID, type.typeId().toString())
-        .put(ICEBERG_FIELD_TYPE_STRING, toTypeString(type))
-        .put(ICEBERG_FIELD_ID, Integer.toString(partitionField.fieldId()))
-        .put(ICEBERG_PARTITION_TRANSFORM, partitionField.transform().toString())
-        .put(ICEBERG_PARTITION_FIELD_ID, Integer.toString(partitionField.fieldId()))
-        .put(ICEBERG_PARTITION_SOURCE_ID, Integer.toString(partitionField.sourceId()))
-        .build();
   }
 }

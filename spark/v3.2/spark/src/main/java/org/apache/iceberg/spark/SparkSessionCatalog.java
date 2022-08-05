@@ -20,7 +20,13 @@
 package org.apache.iceberg.spark;
 
 import java.util.Map;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.iceberg.CatalogProperties;
+import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
+import org.apache.iceberg.spark.source.HasIcebergCatalog;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NamespaceAlreadyExistsException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchTableException;
@@ -123,11 +129,10 @@ public class SparkSessionCatalog<T extends TableCatalog & SupportsNamespaces>
 
   @Override
   public void invalidateTable(Identifier ident) {
-    if (icebergCatalog.tableExists(ident)) {
-      icebergCatalog.invalidateTable(ident);
-    } else {
-      getSessionCatalog().invalidateTable(ident);
-    }
+    // We do not need to check whether the table exists and whether
+    // it is an Iceberg table to reduce remote service requests.
+    icebergCatalog.invalidateTable(ident);
+    getSessionCatalog().invalidateTable(ident);
   }
 
   @Override
@@ -239,6 +244,13 @@ public class SparkSessionCatalog<T extends TableCatalog & SupportsNamespaces>
   }
 
   @Override
+  public boolean purgeTable(Identifier ident) {
+    // no need to check table existence to determine which catalog to use. if a table doesn't exist then both are
+    // required to return false.
+    return icebergCatalog.purgeTable(ident) || getSessionCatalog().purgeTable(ident);
+  }
+
+  @Override
   public void renameTable(Identifier from, Identifier to) throws NoSuchTableException, TableAlreadyExistsException {
     // rename is not supported by HadoopCatalog. to avoid UnsupportedOperationException for session catalog tables,
     // check table existence first to ensure that the table belongs to the Iceberg catalog.
@@ -251,6 +263,10 @@ public class SparkSessionCatalog<T extends TableCatalog & SupportsNamespaces>
 
   @Override
   public final void initialize(String name, CaseInsensitiveStringMap options) {
+    if (options.containsKey("type") && options.get("type").equalsIgnoreCase("hive")) {
+      validateHmsUri(options.get(CatalogProperties.URI));
+    }
+
     this.catalogName = name;
     this.icebergCatalog = buildSparkCatalog(name, options);
     if (icebergCatalog instanceof StagingTableCatalog) {
@@ -260,6 +276,22 @@ public class SparkSessionCatalog<T extends TableCatalog & SupportsNamespaces>
     this.createParquetAsIceberg = options.getBoolean("parquet-enabled", createParquetAsIceberg);
     this.createAvroAsIceberg = options.getBoolean("avro-enabled", createAvroAsIceberg);
     this.createOrcAsIceberg = options.getBoolean("orc-enabled", createOrcAsIceberg);
+  }
+
+  private void validateHmsUri(String catalogHmsUri) {
+    if (catalogHmsUri == null) {
+      return;
+    }
+
+    Configuration conf = SparkSession.active().sessionState().newHadoopConf();
+    String envHmsUri = conf.get(HiveConf.ConfVars.METASTOREURIS.varname, null);
+    if (envHmsUri == null) {
+      return;
+    }
+
+    Preconditions.checkArgument(catalogHmsUri.equals(envHmsUri),
+        "Inconsistent Hive metastore URIs: %s (Spark session) != %s (spark_catalog)",
+        envHmsUri, catalogHmsUri);
   }
 
   @Override
@@ -295,5 +327,12 @@ public class SparkSessionCatalog<T extends TableCatalog & SupportsNamespaces>
     Preconditions.checkNotNull(sessionCatalog, "Delegated SessionCatalog is missing. " +
         "Please make sure your are replacing Spark's default catalog, named 'spark_catalog'.");
     return sessionCatalog;
+  }
+
+  @Override
+  public Catalog icebergCatalog() {
+    Preconditions.checkArgument(icebergCatalog instanceof HasIcebergCatalog,
+        "Cannot return underlying Iceberg Catalog, wrapped catalog does not contain an Iceberg Catalog");
+    return ((HasIcebergCatalog) icebergCatalog).icebergCatalog();
   }
 }

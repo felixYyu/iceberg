@@ -21,6 +21,7 @@ package org.apache.iceberg.io;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.DataFile;
@@ -39,6 +40,7 @@ import org.apache.iceberg.util.CharSequenceSet;
 import org.apache.iceberg.util.StructLikeMap;
 import org.apache.iceberg.util.StructProjection;
 import org.apache.iceberg.util.Tasks;
+import org.apache.iceberg.util.ThreadPools;
 
 public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
   private final List<DataFile> completedDataFiles = Lists.newArrayList();
@@ -72,6 +74,7 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
 
     // clean up files created by this writer
     Tasks.foreach(Iterables.concat(completedDataFiles, completedDeleteFiles))
+        .executeWith(ThreadPools.getWorkerPool())
         .throwFailureWhenFinished()
         .noRetry()
         .run(file -> io.deleteFile(file.path().toString()));
@@ -114,6 +117,11 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
      */
     protected abstract StructLike asStructLike(T data);
 
+    /**
+     * Wrap the passed in key of a row as a {@link StructLike}
+     */
+    protected abstract StructLike asStructLikeKey(T key);
+
     public void write(T row) throws IOException {
       PathOffset pathOffset = PathOffset.of(dataWriter.currentPath(), dataWriter.currentRows());
 
@@ -135,13 +143,16 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
      *
      * @param key has the same columns with the equality fields.
      */
-    private void internalPosDelete(StructLike key) {
+    private boolean internalPosDelete(StructLike key) {
       PathOffset previous = insertedRowMap.remove(key);
 
       if (previous != null) {
         // TODO attach the previous row if has a positional-delete row schema in appender factory.
         posDeleteWriter.delete(previous.path, previous.rowOffset, null);
+        return true;
       }
+
+      return false;
     }
 
     /**
@@ -151,9 +162,9 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
      * @param row the given row to delete.
      */
     public void delete(T row) throws IOException {
-      internalPosDelete(structProjection.wrap(asStructLike(row)));
-
-      eqDeleteWriter.write(row);
+      if (!internalPosDelete(structProjection.wrap(asStructLike(row)))) {
+        eqDeleteWriter.write(row);
+      }
     }
 
     /**
@@ -163,9 +174,9 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
      * @param key is the projected data whose columns are the same as the equality fields.
      */
     public void deleteKey(T key) throws IOException {
-      internalPosDelete(asStructLike(key));
-
-      eqDeleteWriter.write(key);
+      if (!internalPosDelete(asStructLikeKey(key))) {
+        eqDeleteWriter.write(key);
+      }
     }
 
     @Override
@@ -271,9 +282,7 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
     }
 
     private boolean shouldRollToNewFile() {
-      // TODO: ORC file now not support target file size before closed
-      return !format.equals(FileFormat.ORC) &&
-          currentRows % ROWS_DIVISOR == 0 && length(currentWriter) >= targetFileSize;
+      return currentRows % ROWS_DIVISOR == 0 && length(currentWriter) >= targetFileSize;
     }
 
     private void closeCurrent() throws IOException {
@@ -281,7 +290,11 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
         currentWriter.close();
 
         if (currentRows == 0L) {
-          io.deleteFile(currentFile.encryptingOutputFile());
+          try {
+            io.deleteFile(currentFile.encryptingOutputFile());
+          } catch (UncheckedIOException e) {
+            // the file may not have been created, and it isn't worth failing the job to clean up, skip deleting
+          }
         } else {
           complete(currentWriter);
         }
@@ -315,7 +328,7 @@ public abstract class BaseTaskWriter<T> implements TaskWriter<T> {
 
     @Override
     void write(DataWriter<T> writer, T record) {
-      writer.add(record);
+      writer.write(record);
     }
 
     @Override

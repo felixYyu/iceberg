@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.NoSuchTableException;
 import org.apache.iceberg.io.FileIO;
@@ -115,7 +116,12 @@ public abstract class BaseMetastoreTableOperations implements TableOperations {
   public void commit(TableMetadata base, TableMetadata metadata) {
     // if the metadata is already out of date, reject it
     if (base != current()) {
-      throw new CommitFailedException("Cannot commit: stale table metadata");
+      if (base != null) {
+        throw new CommitFailedException("Cannot commit: stale table metadata");
+      } else {
+        // when current is non-null, the table exists. but when base is null, the commit is trying to create the table
+        throw new AlreadyExistsException("Table already exists: %s", tableName());
+      }
     }
     // if the metadata is not changed, return early
     if (base == metadata) {
@@ -325,9 +331,21 @@ public abstract class BaseMetastoreTableOperations implements TableOperations {
     return metadataFileLocation(meta, String.format("%05d-%s%s", newVersion, UUID.randomUUID(), fileExtension));
   }
 
+  /**
+   * Parse the version from table metadata file name.
+   *
+   * @param metadataLocation table metadata file location
+   * @return version of the table metadata file in success case and
+   * -1 if the version is not parsable (as a sign that the metadata is not part of this catalog)
+   */
   private static int parseVersion(String metadataLocation) {
     int versionStart = metadataLocation.lastIndexOf('/') + 1; // if '/' isn't found, this will be 0
     int versionEnd = metadataLocation.indexOf('-', versionStart);
+    if (versionEnd < 0) {
+      // found filesystem table's metadata
+      return -1;
+    }
+
     try {
       return Integer.valueOf(metadataLocation.substring(versionStart, versionEnd));
     } catch (NumberFormatException e) {
@@ -351,10 +369,9 @@ public abstract class BaseMetastoreTableOperations implements TableOperations {
         TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED,
         TableProperties.METADATA_DELETE_AFTER_COMMIT_ENABLED_DEFAULT);
 
-    Set<TableMetadata.MetadataLogEntry> removedPreviousMetadataFiles = Sets.newHashSet(base.previousFiles());
-    removedPreviousMetadataFiles.removeAll(metadata.previousFiles());
-
     if (deleteAfterCommit) {
+      Set<TableMetadata.MetadataLogEntry> removedPreviousMetadataFiles = Sets.newHashSet(base.previousFiles());
+      removedPreviousMetadataFiles.removeAll(metadata.previousFiles());
       Tasks.foreach(removedPreviousMetadataFiles)
           .noRetry().suppressFailureWhenFinished()
           .onFailure((previousMetadataFile, exc) ->

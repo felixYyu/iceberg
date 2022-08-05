@@ -108,15 +108,19 @@ class PruneColumns extends ParquetTypeVisitor<Type> {
 
   @Override
   public Type list(GroupType list, Type element) {
-    GroupType repeated = list.getType(0).asGroupType();
-    Type originalElement = repeated.getType(0);
+    Type repeated = list.getType(0);
+    Type originalElement = ParquetSchemaUtil.determineListElementType(list);
     Integer elementId = getId(originalElement);
 
     if (elementId != null && selectedIds.contains(elementId)) {
       return list;
     } else if (element != null) {
       if (!Objects.equal(element, originalElement)) {
-        return list.withNewFields(repeated.withNewFields(element));
+        if (originalElement.isRepetition(Type.Repetition.REPEATED)) {
+          return list.withNewFields(element);
+        } else {
+          return list.withNewFields(repeated.asGroupType().withNewFields(element));
+        }
       }
       return list;
     }
@@ -160,8 +164,8 @@ class PruneColumns extends ParquetTypeVisitor<Type> {
     } else {
       GroupType groupType = field.asGroupType();
       LogicalTypeAnnotation logicalTypeAnnotation = groupType.getLogicalTypeAnnotation();
-      return !logicalTypeAnnotation.equals(LogicalTypeAnnotation.mapType()) &&
-          !logicalTypeAnnotation.equals(LogicalTypeAnnotation.listType());
+      return !LogicalTypeAnnotation.mapType().equals(logicalTypeAnnotation) &&
+          !LogicalTypeAnnotation.listType().equals(logicalTypeAnnotation);
     }
   }
 }

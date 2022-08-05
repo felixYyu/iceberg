@@ -24,12 +24,16 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.GZIPOutputStream;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.CatalogProperties;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileMetadata;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
@@ -86,6 +90,13 @@ public class HadoopTableTestBase {
       .withFileSizeInBytes(0)
       .withPartitionPath("data_bucket=1") // easy way to set partition data for now
       .withRecordCount(2) // needs at least one record or else metrics will filter it out
+      .build();
+  static final DeleteFile FILE_B_DELETES = FileMetadata.deleteFileBuilder(SPEC)
+      .ofPositionDeletes()
+      .withPath("/path/to/data-b-deletes.parquet")
+      .withFileSizeInBytes(0)
+      .withPartitionPath("data_bucket=1")
+      .withRecordCount(1)
       .build();
   static final DataFile FILE_C = DataFiles.builder(SPEC)
       .withPath("/path/to/data-a.parquet")
@@ -170,10 +181,18 @@ public class HadoopTableTestBase {
   }
 
   protected HadoopCatalog hadoopCatalog() throws IOException {
+    return hadoopCatalog(Collections.emptyMap());
+  }
+
+  protected HadoopCatalog hadoopCatalog(Map<String, String> catalogProperties) throws IOException {
     HadoopCatalog hadoopCatalog = new HadoopCatalog();
     hadoopCatalog.setConf(new Configuration());
-    hadoopCatalog.initialize("hadoop",
-            ImmutableMap.of(CatalogProperties.WAREHOUSE_LOCATION, temp.newFolder().getAbsolutePath()));
+    hadoopCatalog.initialize(
+        "hadoop",
+        ImmutableMap.<String, String>builder()
+            .putAll(catalogProperties)
+            .put(CatalogProperties.WAREHOUSE_LOCATION, temp.newFolder().getAbsolutePath())
+            .build());
     return hadoopCatalog;
   }
 }

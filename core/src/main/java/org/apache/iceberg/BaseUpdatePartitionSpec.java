@@ -84,7 +84,7 @@ class BaseUpdatePartitionSpec implements UpdatePartitionSpec {
    */
   @VisibleForTesting
   BaseUpdatePartitionSpec(int formatVersion, PartitionSpec spec) {
-    this(formatVersion, spec, spec.fields().stream().mapToInt(PartitionField::fieldId).max().orElse(999));
+    this(formatVersion, spec, spec.lastAssignedFieldId());
   }
 
   /**
@@ -108,6 +108,35 @@ class BaseUpdatePartitionSpec implements UpdatePartitionSpec {
     return lastAssignedPartitionId;
   }
 
+  /**
+   * In V2 it searches for a similar partition field in historical partition specs. Tries to match on source field
+   * ID, transform type and target name (optional). If not found or in V1 cases it creates a new PartitionField.
+   * @param sourceTransform pair of source ID and transform for this PartitionField addition
+   * @param name target partition field name, if specified
+   * @return the recycled or newly created partition field
+   */
+  private PartitionField recycleOrCreatePartitionField(Pair<Integer, Transform<?, ?>> sourceTransform, String name) {
+    if (formatVersion == 2 && base != null) {
+      int sourceId = sourceTransform.first();
+      Transform<?, ?> transform = sourceTransform.second();
+
+      Set<PartitionField> allHistoricalFields = Sets.newHashSet();
+      for (PartitionSpec partitionSpec : base.specs()) {
+        allHistoricalFields.addAll(partitionSpec.fields());
+      }
+
+      for (PartitionField field : allHistoricalFields) {
+        if (field.sourceId() == sourceId && field.transform().equals(transform)) {
+          // if target name is specified then consider it too, otherwise not
+          if (name == null || field.name().equals(name)) {
+            return field;
+          }
+        }
+      }
+    }
+    return new PartitionField(sourceTransform.first(), assignFieldId(), name, sourceTransform.second());
+  }
+
   @Override
   public UpdatePartitionSpec caseSensitive(boolean isCaseSensitive) {
     this.caseSensitive = isCaseSensitive;
@@ -124,6 +153,16 @@ class BaseUpdatePartitionSpec implements UpdatePartitionSpec {
     return addField(null, term);
   }
 
+  private BaseUpdatePartitionSpec rewriteDeleteAndAddField(
+      PartitionField existing, String name, Pair<Integer, Transform<?, ?>> sourceTransform) {
+    deletes.remove(existing.fieldId());
+    if (name == null || existing.name().equals(name)) {
+      return this;
+    } else {
+      return renameField(existing.name(), name);
+    }
+  }
+
   @Override
   public BaseUpdatePartitionSpec addField(String name, Term term) {
     PartitionField alreadyAdded = nameToAddedField.get(name);
@@ -133,15 +172,21 @@ class BaseUpdatePartitionSpec implements UpdatePartitionSpec {
     Pair<Integer, String> validationKey = Pair.of(sourceTransform.first(), sourceTransform.second().toString());
 
     PartitionField existing = transformToField.get(validationKey);
-    Preconditions.checkArgument(existing == null,
+    if (existing != null && deletes.contains(existing.fieldId()) &&
+        existing.transform().equals(sourceTransform.second())) {
+      return rewriteDeleteAndAddField(existing, name, sourceTransform);
+    }
+
+    Preconditions.checkArgument(existing == null ||
+        (deletes.contains(existing.fieldId()) &&
+            !existing.transform().toString().equals(sourceTransform.second().toString())),
         "Cannot add duplicate partition field %s=%s, conflicts with %s", name, term, existing);
 
     PartitionField added = transformToAddedField.get(validationKey);
     Preconditions.checkArgument(added == null,
         "Cannot add duplicate partition field %s=%s, already added: %s", name, term, added);
 
-    PartitionField newField = new PartitionField(
-        sourceTransform.first(), assignFieldId(), name, sourceTransform.second());
+    PartitionField newField = recycleOrCreatePartitionField(sourceTransform, name);
     if (newField.name() == null) {
       String partitionName = PartitionSpecVisitor.visit(schema, newField, PartitionNameGenerator.INSTANCE);
       newField = new PartitionField(newField.sourceId(), newField.fieldId(), partitionName, newField.transform());
@@ -151,13 +196,15 @@ class BaseUpdatePartitionSpec implements UpdatePartitionSpec {
     transformToAddedField.put(validationKey, newField);
 
     PartitionField existingField = nameToField.get(newField.name());
-    if (existingField != null) {
+    if (existingField != null && !deletes.contains(existingField.fieldId())) {
       if (isVoidTransform(existingField)) {
         // rename the old deleted field that is being replaced by the new field
         renameField(existingField.name(), existingField.name() + "_" + existingField.fieldId());
       } else {
         throw new IllegalArgumentException(String.format("Cannot add duplicate partition field name: %s", name));
       }
+    } else if (existingField != null && deletes.contains(existingField.fieldId())) {
+      renames.put(existingField.name(), existingField.name() + "_" + existingField.fieldId());
     }
 
     nameToAddedField.put(newField.name(), newField);
@@ -242,7 +289,12 @@ class BaseUpdatePartitionSpec implements UpdatePartitionSpec {
         // field IDs were not required for v1 and were assigned sequentially in each partition spec starting at 1,000.
         // to maintain consistent field ids across partition specs in v1 tables, any partition field that is removed
         // must be replaced with a null transform. null values are always allowed in partition data.
-        builder.add(field.sourceId(), field.fieldId(), field.name(), Transforms.alwaysNull());
+        String newName = renames.get(field.name());
+        if (newName != null) {
+          builder.add(field.sourceId(), field.fieldId(), newName, Transforms.alwaysNull());
+        } else {
+          builder.add(field.sourceId(), field.fieldId(), field.name(), Transforms.alwaysNull());
+        }
       }
     }
 

@@ -29,6 +29,7 @@ import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
 import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.util.SerializableMap;
+import org.apache.iceberg.util.SerializableSupplier;
 
 /**
  * A read-only serializable table that can be sent to other nodes in a cluster.
@@ -66,7 +67,7 @@ public class SerializableTable implements Table, Serializable {
   private transient volatile Map<Integer, PartitionSpec> lazySpecs = null;
   private transient volatile SortOrder lazySortOrder = null;
 
-  private SerializableTable(Table table) {
+  protected SerializableTable(Table table) {
     this.name = table.name();
     this.location = table.location();
     this.metadataFileLocation = metadataFileLocation(table);
@@ -107,7 +108,7 @@ public class SerializableTable implements Table, Serializable {
 
   private FileIO fileIO(Table table) {
     if (table.io() instanceof HadoopConfigurable) {
-      ((HadoopConfigurable) table.io()).serializeConfWith(conf -> new SerializableConfiguration(conf)::get);
+      ((HadoopConfigurable) table.io()).serializeConfWith(SerializableConfSupplier::new);
     }
 
     return table.io();
@@ -345,11 +346,11 @@ public class SerializableTable implements Table, Serializable {
     return String.format("Operation %s is not supported after the table is serialized", operation);
   }
 
-  private static class SerializableMetadataTable extends SerializableTable {
+  public static class SerializableMetadataTable extends SerializableTable {
     private final MetadataTableType type;
     private final String baseTableName;
 
-    SerializableMetadataTable(BaseMetadataTable metadataTable) {
+    protected SerializableMetadataTable(BaseMetadataTable metadataTable) {
       super(metadataTable);
       this.type = metadataTable.metadataTableType();
       this.baseTableName = metadataTable.table().name();
@@ -362,16 +363,17 @@ public class SerializableTable implements Table, Serializable {
   }
 
   // captures the current state of a Hadoop configuration in a serializable manner
-  private static class SerializableConfiguration implements Serializable {
+  private static class SerializableConfSupplier implements SerializableSupplier<Configuration> {
 
     private final Map<String, String> confAsMap;
     private transient volatile Configuration conf = null;
 
-    SerializableConfiguration(Configuration conf) {
+    SerializableConfSupplier(Configuration conf) {
       this.confAsMap = Maps.newHashMapWithExpectedSize(conf.size());
       conf.forEach(entry -> confAsMap.put(entry.getKey(), entry.getValue()));
     }
 
+    @Override
     public Configuration get() {
       if (conf == null) {
         synchronized (this) {

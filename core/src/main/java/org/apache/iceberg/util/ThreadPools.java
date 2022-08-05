@@ -21,6 +21,9 @@ package org.apache.iceberg.util;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import org.apache.iceberg.SystemProperties;
 import org.apache.iceberg.relocated.com.google.common.util.concurrent.MoreExecutors;
@@ -36,15 +39,9 @@ public class ThreadPools {
 
   public static final int WORKER_THREAD_POOL_SIZE = getPoolSize(
       WORKER_THREAD_POOL_SIZE_PROP,
-      Runtime.getRuntime().availableProcessors());
+      Math.max(2, Runtime.getRuntime().availableProcessors()));
 
-  private static final ExecutorService WORKER_POOL = MoreExecutors.getExitingExecutorService(
-      (ThreadPoolExecutor) Executors.newFixedThreadPool(
-          WORKER_THREAD_POOL_SIZE,
-          new ThreadFactoryBuilder()
-              .setDaemon(true)
-              .setNameFormat("iceberg-worker-pool-%d")
-              .build()));
+  private static final ExecutorService WORKER_POOL = newWorkerPool("iceberg-worker-pool");
 
   /**
    * Return an {@link ExecutorService} that uses the "worker" thread-pool.
@@ -61,6 +58,28 @@ public class ThreadPools {
     return WORKER_POOL;
   }
 
+  public static ExecutorService newWorkerPool(String namePrefix) {
+    return newWorkerPool(namePrefix, WORKER_THREAD_POOL_SIZE);
+  }
+
+  public static ExecutorService newWorkerPool(String namePrefix, int poolSize) {
+    return MoreExecutors.getExitingExecutorService(
+        (ThreadPoolExecutor) Executors.newFixedThreadPool(poolSize, newDaemonThreadFactory(namePrefix)));
+  }
+
+  /**
+   * Create a new {@link ScheduledExecutorService} with the given name and pool size.
+   * <p>
+   * Threads used by this service will be daemon threads.
+   *
+   * @param namePrefix a base name for threads in the executor service's thread pool
+   * @param poolSize max number of threads to use
+   * @return an executor service
+   */
+  public static ScheduledExecutorService newScheduledPool(String namePrefix, int poolSize) {
+    return new ScheduledThreadPoolExecutor(poolSize, newDaemonThreadFactory(namePrefix));
+  }
+
   private static int getPoolSize(String systemProperty, int defaultSize) {
     String value = System.getProperty(systemProperty);
     if (value != null) {
@@ -71,5 +90,12 @@ public class ThreadPools {
       }
     }
     return defaultSize;
+  }
+
+  private static ThreadFactory newDaemonThreadFactory(String namePrefix) {
+    return new ThreadFactoryBuilder()
+        .setDaemon(true)
+        .setNameFormat(namePrefix + "-%d")
+        .build();
   }
 }

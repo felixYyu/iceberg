@@ -183,13 +183,12 @@ public abstract class BaseParquetReaders<T> {
         return null;
       }
 
-      GroupType repeated = array.getFields().get(0).asGroupType();
       String[] repeatedPath = currentPath();
 
       int repeatedD = type.getMaxDefinitionLevel(repeatedPath) - 1;
       int repeatedR = type.getMaxRepetitionLevel(repeatedPath) - 1;
 
-      Type elementType = repeated.getType(0);
+      Type elementType = ParquetSchemaUtil.determineListElementType(array);
       int elementD = type.getMaxDefinitionLevel(path(elementType.getName())) - 1;
 
       return new ParquetValueReaders.ListReader<>(repeatedD, repeatedR,
@@ -292,7 +291,11 @@ public abstract class BaseParquetReaders<T> {
         case FIXED_LEN_BYTE_ARRAY:
           return new FixedReader(desc);
         case BINARY:
-          return new ParquetValueReaders.BytesReader(desc);
+          if (expected != null && expected.typeId() == org.apache.iceberg.types.Type.TypeID.STRING) {
+            return new ParquetValueReaders.StringReader(desc);
+          } else {
+            return new ParquetValueReaders.BytesReader(desc);
+          }
         case INT32:
           if (expected != null && expected.typeId() == org.apache.iceberg.types.Type.TypeID.LONG) {
             return new ParquetValueReaders.IntAsLongReader(desc);

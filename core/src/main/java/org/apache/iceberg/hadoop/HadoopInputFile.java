@@ -28,6 +28,8 @@ import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.iceberg.encryption.NativeFileCryptoParameters;
+import org.apache.iceberg.encryption.NativelyEncryptedFile;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.RuntimeIOException;
 import org.apache.iceberg.io.InputFile;
@@ -40,7 +42,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Lists;
  * <p>
  * This class is based on Parquet's HadoopInputFile.
  */
-public class HadoopInputFile implements InputFile {
+public class HadoopInputFile implements InputFile, NativelyEncryptedFile {
   public static final String[] NO_LOCATION_PREFERENCE = new String[0];
 
   private final String location;
@@ -49,6 +51,7 @@ public class HadoopInputFile implements InputFile {
   private final Configuration conf;
   private FileStatus stat = null;
   private Long length = null;
+  private NativeFileCryptoParameters nativeDecryptionParameters;
 
   public static HadoopInputFile fromLocation(CharSequence location, Configuration conf) {
     FileSystem fs = Util.getFs(new Path(location.toString()), conf);
@@ -58,7 +61,11 @@ public class HadoopInputFile implements InputFile {
   public static HadoopInputFile fromLocation(CharSequence location, long length,
                                              Configuration conf) {
     FileSystem fs = Util.getFs(new Path(location.toString()), conf);
-    return new HadoopInputFile(fs, location.toString(), length, conf);
+    if (length > 0) {
+      return new HadoopInputFile(fs, location.toString(), length, conf);
+    } else {
+      return new HadoopInputFile(fs, location.toString(), conf);
+    }
   }
 
   public static HadoopInputFile fromLocation(CharSequence location, FileSystem fs) {
@@ -222,6 +229,16 @@ public class HadoopInputFile implements InputFile {
     } catch (IOException e) {
       throw new RuntimeIOException(e, "Failed to check existence for file: %s", path);
     }
+  }
+
+  @Override
+  public NativeFileCryptoParameters nativeCryptoParameters() {
+    return nativeDecryptionParameters;
+  }
+
+  @Override
+  public void setNativeCryptoParameters(NativeFileCryptoParameters nativeCryptoParameters) {
+    this.nativeDecryptionParameters = nativeCryptoParameters;
   }
 
   @Override

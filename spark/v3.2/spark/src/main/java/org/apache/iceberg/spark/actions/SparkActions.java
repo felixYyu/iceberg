@@ -21,9 +21,6 @@ package org.apache.iceberg.spark.actions;
 
 import org.apache.iceberg.Table;
 import org.apache.iceberg.actions.ActionsProvider;
-import org.apache.iceberg.actions.MigrateTable;
-import org.apache.iceberg.actions.RewriteDataFiles;
-import org.apache.iceberg.actions.SnapshotTable;
 import org.apache.iceberg.spark.Spark3Util;
 import org.apache.iceberg.spark.Spark3Util.CatalogAndIdentifier;
 import org.apache.spark.sql.SparkSession;
@@ -35,10 +32,12 @@ import org.apache.spark.sql.connector.catalog.CatalogPlugin;
  * This class is the primary API for interacting with actions in Spark that users should use
  * to instantiate particular actions.
  */
-public class SparkActions extends BaseSparkActions {
+public class SparkActions implements ActionsProvider {
+
+  private final SparkSession spark;
 
   private SparkActions(SparkSession spark) {
-    super(spark);
+    this.spark = spark;
   }
 
   public static SparkActions get(SparkSession spark) {
@@ -50,23 +49,43 @@ public class SparkActions extends BaseSparkActions {
   }
 
   @Override
-  public SnapshotTable snapshotTable(String tableIdent) {
+  public SnapshotTableSparkAction snapshotTable(String tableIdent) {
     String ctx = "snapshot source";
-    CatalogPlugin defaultCatalog = spark().sessionState().catalogManager().currentCatalog();
-    CatalogAndIdentifier catalogAndIdent = Spark3Util.catalogAndIdentifier(ctx, spark(), tableIdent, defaultCatalog);
-    return new BaseSnapshotTableSparkAction(spark(), catalogAndIdent.catalog(), catalogAndIdent.identifier());
+    CatalogPlugin defaultCatalog = spark.sessionState().catalogManager().currentCatalog();
+    CatalogAndIdentifier catalogAndIdent = Spark3Util.catalogAndIdentifier(ctx, spark, tableIdent, defaultCatalog);
+    return new BaseSnapshotTableSparkAction(spark, catalogAndIdent.catalog(), catalogAndIdent.identifier());
   }
 
   @Override
-  public MigrateTable migrateTable(String tableIdent) {
+  public MigrateTableSparkAction migrateTable(String tableIdent) {
     String ctx = "migrate target";
-    CatalogPlugin defaultCatalog = spark().sessionState().catalogManager().currentCatalog();
-    CatalogAndIdentifier catalogAndIdent = Spark3Util.catalogAndIdentifier(ctx, spark(), tableIdent, defaultCatalog);
-    return new BaseMigrateTableSparkAction(spark(), catalogAndIdent.catalog(), catalogAndIdent.identifier());
+    CatalogPlugin defaultCatalog = spark.sessionState().catalogManager().currentCatalog();
+    CatalogAndIdentifier catalogAndIdent = Spark3Util.catalogAndIdentifier(ctx, spark, tableIdent, defaultCatalog);
+    return new BaseMigrateTableSparkAction(spark, catalogAndIdent.catalog(), catalogAndIdent.identifier());
   }
 
   @Override
-  public RewriteDataFiles rewriteDataFiles(Table table) {
-    return new BaseRewriteDataFilesSpark3Action(spark(), table);
+  public RewriteDataFilesSparkAction rewriteDataFiles(Table table) {
+    return new BaseRewriteDataFilesSparkAction(spark, table);
+  }
+
+  @Override
+  public DeleteOrphanFilesSparkAction deleteOrphanFiles(Table table) {
+    return new BaseDeleteOrphanFilesSparkAction(spark, table);
+  }
+
+  @Override
+  public RewriteManifestsSparkAction rewriteManifests(Table table) {
+    return new BaseRewriteManifestsSparkAction(spark, table);
+  }
+
+  @Override
+  public ExpireSnapshotsSparkAction expireSnapshots(Table table) {
+    return new BaseExpireSnapshotsSparkAction(spark, table);
+  }
+
+  @Override
+  public DeleteReachableFilesSparkAction deleteReachableFiles(String metadataLocation) {
+    return new BaseDeleteReachableFilesSparkAction(spark, metadataLocation);
   }
 }

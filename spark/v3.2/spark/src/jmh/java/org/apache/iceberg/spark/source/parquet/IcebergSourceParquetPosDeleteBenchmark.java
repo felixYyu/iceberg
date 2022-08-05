@@ -32,9 +32,9 @@ import org.openjdk.jmh.annotations.Param;
  * This class uses a dataset with a flat schema.
  * To run this benchmark for spark-3.2:
  * <code>
- * ./gradlew :iceberg-spark:iceberg-spark-3.2:jmh
- *   -PjmhIncludeRegex=IcebergSourceParquetPosDeleteBenchmark
- *   -PjmhOutputPath=benchmark/iceberg-source-parquet-pos-delete-benchmark-result.txt
+ *   ./gradlew -DsparkVersions=3.2 :iceberg-spark:iceberg-spark-3.2:jmh
+ *       -PjmhIncludeRegex=IcebergSourceParquetPosDeleteBenchmark
+ *       -PjmhOutputPath=benchmark/iceberg-source-parquet-pos-delete-benchmark-result.txt
  * </code>
  */
 public class IcebergSourceParquetPosDeleteBenchmark extends IcebergSourceDeleteBenchmark {
@@ -49,7 +49,7 @@ public class IcebergSourceParquetPosDeleteBenchmark extends IcebergSourceDeleteB
       if (percentDeleteRow > 0) {
         // add pos-deletes
         table().refresh();
-        for (DataFile file : table().currentSnapshot().addedFiles()) {
+        for (DataFile file : table().currentSnapshot().addedDataFiles(table().io())) {
           writePosDeletes(file.path(), NUM_ROWS, percentDeleteRow);
         }
       }

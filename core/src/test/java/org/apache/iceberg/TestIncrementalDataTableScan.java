@@ -22,6 +22,8 @@ package org.apache.iceberg;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.iceberg.events.IncrementalScanEvent;
 import org.apache.iceberg.events.Listener;
 import org.apache.iceberg.events.Listeners;
@@ -107,6 +109,7 @@ public class TestIncrementalDataTableScan extends TableTestBase {
     Assert.assertEquals(table.schema(), listener1.event().projection());
     Assert.assertEquals(Expressions.alwaysTrue(), listener1.event().filter());
     Assert.assertEquals("test", listener1.event().tableName());
+    Assert.assertEquals(false, listener1.event().isFromSnapshotInclusive());
   }
 
   @Test
@@ -233,6 +236,25 @@ public class TestIncrementalDataTableScan extends TableTestBase {
         }
       }
     }
+  }
+
+  @Test
+  public void testPlanWithExecutor() throws IOException {
+    add(table.newAppend(), files("A"));
+    add(table.newAppend(), files("B"));
+    add(table.newAppend(), files("C"));
+
+    AtomicInteger planThreadsIndex = new AtomicInteger(0);
+    TableScan scan = table.newScan()
+        .appendsAfter(1)
+        .planWith(Executors.newFixedThreadPool(1, runnable -> {
+          Thread thread = new Thread(runnable);
+          thread.setName("plan-" + planThreadsIndex.getAndIncrement());
+          thread.setDaemon(true); // daemon threads will be terminated abruptly when the JVM exits
+          return thread;
+        }));
+    Assert.assertEquals(2, Iterables.size(scan.planFiles()));
+    Assert.assertTrue("Thread should be created in provided pool", planThreadsIndex.get() > 0);
   }
 
   private static DataFile file(String name) {

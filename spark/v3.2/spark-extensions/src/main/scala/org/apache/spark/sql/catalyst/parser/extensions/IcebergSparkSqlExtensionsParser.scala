@@ -26,6 +26,8 @@ import org.antlr.v4.runtime.misc.Interval
 import org.antlr.v4.runtime.misc.ParseCancellationException
 import org.antlr.v4.runtime.tree.TerminalNodeImpl
 import org.apache.iceberg.common.DynConstructors
+import org.apache.iceberg.spark.ExtendedParser
+import org.apache.iceberg.spark.ExtendedParser.RawOrderField
 import org.apache.iceberg.spark.Spark3Util
 import org.apache.iceberg.spark.source.SparkTable
 import org.apache.spark.sql.AnalysisException
@@ -41,6 +43,9 @@ import org.apache.spark.sql.catalyst.parser.extensions.IcebergSqlExtensionsParse
 import org.apache.spark.sql.catalyst.plans.logical.DeleteFromIcebergTable
 import org.apache.spark.sql.catalyst.plans.logical.DeleteFromTable
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.MergeIntoContext
+import org.apache.spark.sql.catalyst.plans.logical.MergeIntoTable
+import org.apache.spark.sql.catalyst.plans.logical.UnresolvedMergeIntoIcebergTable
 import org.apache.spark.sql.catalyst.plans.logical.UpdateIcebergTable
 import org.apache.spark.sql.catalyst.plans.logical.UpdateTable
 import org.apache.spark.sql.catalyst.trees.Origin
@@ -51,10 +56,10 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.VariableSubstitution
 import org.apache.spark.sql.types.DataType
 import org.apache.spark.sql.types.StructType
-import scala.collection.JavaConverters.seqAsJavaListConverter
+import scala.jdk.CollectionConverters._
 import scala.util.Try
 
-class IcebergSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInterface {
+class IcebergSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserInterface with ExtendedParser {
 
   import IcebergSparkSqlExtensionsParser._
 
@@ -109,6 +114,14 @@ class IcebergSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserI
     delegate.parseTableSchema(sqlText)
   }
 
+  override def parseSortOrder(sqlText: String): java.util.List[RawOrderField] = {
+    val fields = parse(sqlText) { parser => astBuilder.visitSingleOrder(parser.singleOrder()) }
+    fields.map { field =>
+      val (term, direction, order) = field
+      new RawOrderField(term, direction, order)
+    }.asJava
+  }
+
   /**
    * Parse a string to a LogicalPlan.
    */
@@ -127,13 +140,19 @@ class IcebergSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserI
     }
   }
 
-  private def replaceRowLevelCommands(plan: LogicalPlan): LogicalPlan = plan match {
+  private def replaceRowLevelCommands(plan: LogicalPlan): LogicalPlan = plan resolveOperatorsDown {
     case DeleteFromTable(UnresolvedIcebergTable(aliasedTable), condition) =>
       DeleteFromIcebergTable(aliasedTable, condition)
+
     case UpdateTable(UnresolvedIcebergTable(aliasedTable), assignments, condition) =>
       UpdateIcebergTable(aliasedTable, assignments, condition)
-    case _ =>
-      plan
+
+    case MergeIntoTable(UnresolvedIcebergTable(aliasedTable), source, cond, matchedActions, notMatchedActions) =>
+      // cannot construct MergeIntoIcebergTable right away as MERGE operations require special resolution
+      // that's why the condition and actions must be hidden from the regular resolution rules in Spark
+      // see ResolveMergeIntoTableReferences for details
+      val context = MergeIntoContext(cond, matchedActions, notMatchedActions)
+      UnresolvedMergeIntoIcebergTable(aliasedTable, source, context)
   }
 
   object UnresolvedIcebergTable {
@@ -167,7 +186,15 @@ class IcebergSparkSqlExtensionsParser(delegate: ParserInterface) extends ParserI
   }
 
   private def isIcebergCommand(sqlText: String): Boolean = {
-    val normalized = sqlText.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " ")
+    val normalized = sqlText.toLowerCase(Locale.ROOT).trim()
+      // Strip simple SQL comments that terminate a line, e.g. comments starting with `--` .
+      .replaceAll("--.*?\\n", " ")
+      // Strip newlines.
+      .replaceAll("\\s+", " ")
+      // Strip comments of the form  /* ... */. This must come after stripping newlines so that
+      // comments that span multiple lines are caught.
+      .replaceAll("/\\*.*?\\*/", " ")
+      .trim()
     normalized.startsWith("call") || (
         normalized.startsWith("alter table") && (
             normalized.contains("add partition field") ||

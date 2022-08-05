@@ -40,6 +40,7 @@ import org.junit.Test;
 public class TestSelect extends SparkCatalogTestBase {
   private int scanEventCount = 0;
   private ScanEvent lastScanEvent = null;
+  private String binaryTableName = tableName("binary_table");
 
   public TestSelect(String catalogName, String implementation, Map<String, String> config) {
     super(catalogName, implementation, config);
@@ -63,6 +64,7 @@ public class TestSelect extends SparkCatalogTestBase {
   @After
   public void removeTables() {
     sql("DROP TABLE IF EXISTS %s", tableName);
+    sql("DROP TABLE IF EXISTS %s", binaryTableName);
   }
 
   @Test
@@ -202,5 +204,29 @@ public class TestSelect extends SparkCatalogTestBase {
             .load(tableName)
             .collectAsList();
         });
+  }
+
+  @Test
+  public void testBinaryInFilter() {
+    sql("CREATE TABLE %s (id bigint, binary binary) USING iceberg", binaryTableName);
+    sql("INSERT INTO %s VALUES (1, X''), (2, X'1111'), (3, X'11')", binaryTableName);
+    List<Object[]> expected = ImmutableList.of(row(2L, new byte[]{0x11, 0x11}));
+
+    assertEquals("Should return all expected rows", expected,
+        sql("SELECT id, binary FROM %s where binary > X'11'", binaryTableName));
+  }
+
+  @Test
+  public void testComplexTypeFilter() {
+    String complexTypeTableName = tableName("complex_table");
+    sql("CREATE TABLE %s (id INT, complex STRUCT<c1:INT,c2:STRING>) USING iceberg", complexTypeTableName);
+    sql("INSERT INTO TABLE %s VALUES (1, named_struct(\"c1\", 3, \"c2\", \"v1\"))", complexTypeTableName);
+    sql("INSERT INTO TABLE %s VALUES (2, named_struct(\"c1\", 2, \"c2\", \"v2\"))", complexTypeTableName);
+
+    List<Object[]> result = sql("SELECT id FROM %s WHERE complex = named_struct(\"c1\", 3, \"c2\", \"v1\")",
+        complexTypeTableName);
+
+    assertEquals("Should return all expected rows", ImmutableList.of(row(1)), result);
+    sql("DROP TABLE IF EXISTS %s", complexTypeTableName);
   }
 }

@@ -41,6 +41,7 @@ import org.apache.iceberg.hive.MetastoreUtil;
 import org.apache.iceberg.mr.InputFormatConfig;
 import org.apache.iceberg.mr.TestHelper;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
@@ -112,7 +113,8 @@ public class TestHiveIcebergStorageHandlerWithEngine {
         if (javaVersion.equals("1.8") || "mr".equals(engine)) {
           testParams.add(new Object[] {fileFormat, engine, TestTables.TestTableType.HIVE_CATALOG, false});
           // test for vectorization=ON in case of ORC format and Tez engine
-          if (fileFormat == FileFormat.ORC && "tez".equals(engine) && MetastoreUtil.hive3PresentOnClasspath()) {
+          if ((fileFormat == FileFormat.PARQUET || fileFormat == FileFormat.ORC) &&
+              "tez".equals(engine) && MetastoreUtil.hive3PresentOnClasspath()) {
             testParams.add(new Object[] {fileFormat, engine, TestTables.TestTableType.HIVE_CATALOG, true});
           }
         }
@@ -158,7 +160,7 @@ public class TestHiveIcebergStorageHandlerWithEngine {
   }
 
   @AfterClass
-  public static void afterClass() {
+  public static void afterClass() throws Exception {
     shell.stop();
   }
 
@@ -167,6 +169,11 @@ public class TestHiveIcebergStorageHandlerWithEngine {
     testTables = HiveIcebergStorageHandlerTestUtils.testTables(shell, testTableType, temp);
     HiveIcebergStorageHandlerTestUtils.init(shell, testTables, temp, executionEngine);
     HiveConf.setBoolVar(shell.getHiveConf(), HiveConf.ConfVars.HIVE_VECTORIZATION_ENABLED, isVectorized);
+    if (isVectorized) {
+      HiveConf.setVar(shell.getHiveConf(), HiveConf.ConfVars.HIVEFETCHTASKCONVERSION, "none");
+    } else {
+      HiveConf.setVar(shell.getHiveConf(), HiveConf.ConfVars.HIVEFETCHTASKCONVERSION, "more");
+    }
   }
 
   @After
@@ -266,8 +273,7 @@ public class TestHiveIcebergStorageHandlerWithEngine {
   public void testJoinTablesSupportedTypes() throws IOException {
     for (int i = 0; i < SUPPORTED_TYPES.size(); i++) {
       Type type = SUPPORTED_TYPES.get(i);
-      if (type == Types.TimestampType.withZone() && isVectorized) {
-        // ORC/TIMESTAMP_INSTANT is not a supported vectorized type for Hive
+      if (isUnsupportedVectorizedTypeForHive(type)) {
         continue;
       }
       // TODO: remove this filter when issue #1881 is resolved
@@ -293,8 +299,7 @@ public class TestHiveIcebergStorageHandlerWithEngine {
   public void testSelectDistinctFromTable() throws IOException {
     for (int i = 0; i < SUPPORTED_TYPES.size(); i++) {
       Type type = SUPPORTED_TYPES.get(i);
-      if (type == Types.TimestampType.withZone() && isVectorized) {
-        // ORC/TIMESTAMP_INSTANT is not a supported vectorized type for Hive
+      if (isUnsupportedVectorizedTypeForHive(type)) {
         continue;
       }
       // TODO: remove this filter when issue #1881 is resolved
@@ -703,6 +708,34 @@ public class TestHiveIcebergStorageHandlerWithEngine {
     HiveIcebergTestUtils.validateData(target2, target2Records, 1);
   }
 
+  /**
+  * Fix vectorized parquet
+  * <a href="https://github.com/apache/iceberg/issues/4403">issue-4403</a>.
+  **/
+  @Test
+  public void testStructMapWithNull() throws IOException {
+    Assume.assumeTrue("Vectorized parquet throw class cast exception see : issue 4403",
+        !("PARQUET".equals(fileFormat.name()) && isVectorized));
+    Schema schema = new Schema(required(1, "id", Types.LongType.get()),
+        required(2, "mapofstructs", Types.MapType.ofRequired(3, 4, Types.StringType.get(),
+            Types.StructType.of(required(5, "something", Types.StringType.get()),
+                required(6, "someone", Types.StringType.get()),
+                required(7, "somewhere", Types.StringType.get())
+            ))
+        )
+    );
+
+    List<Record> records = TestHelper.RecordsBuilder.newInstance(schema)
+        .add(0L, ImmutableMap.of())
+        .build();
+
+    testTables.createTable(shell, "mapwithnull", schema, fileFormat, records);
+
+    List<Object[]> results = shell.executeStatement("select mapofstructs['context'].someone FROM mapwithnull");
+    Assert.assertEquals(1, results.size());
+    Assert.assertNull(results.get(0)[0]);
+  }
+
   @Test
   public void testWriteWithDefaultWriteFormat() {
     Assume.assumeTrue("Testing the default file format is enough for a single scenario.",
@@ -807,6 +840,74 @@ public class TestHiveIcebergStorageHandlerWithEngine {
 
     Assert.assertEquals(20000, result.size());
 
+  }
+
+  @Test
+  public void testRemoveAndAddBackColumnFromIcebergTable() throws IOException {
+    assumeTrue(isVectorized && FileFormat.PARQUET.equals(fileFormat));
+    // Create an Iceberg table with the columns customer_id, first_name and last_name with some initial data.
+    Table icebergTable = testTables.createTable(shell, "customers", HiveIcebergStorageHandlerTestUtils.CUSTOMER_SCHEMA,
+        fileFormat, HiveIcebergStorageHandlerTestUtils.CUSTOMER_RECORDS);
+
+    // Remove the first_name column
+    icebergTable.updateSchema().deleteColumn("first_name").commit();
+    // Add a new column with the name first_name
+    icebergTable.updateSchema().addColumn("first_name", Types.StringType.get(), "This is new first name").commit();
+
+    // Add new data to the table with the new first_name column filled.
+    icebergTable = testTables.loadTable(TableIdentifier.of("default", "customers"));
+    Schema customerSchemaWithNewFirstName = new Schema(optional(1, "customer_id", Types.LongType.get()),
+        optional(2, "last_name", Types.StringType.get(), "This is last name"),
+        optional(3, "first_name", Types.StringType.get(), "This is the newly added first name"));
+    List<Record> newCustomersWithNewFirstName =
+        TestHelper.RecordsBuilder.newInstance(customerSchemaWithNewFirstName).add(3L, "Red", "James").build();
+    testTables.appendIcebergTable(shell.getHiveConf(), icebergTable, fileFormat, null, newCustomersWithNewFirstName);
+
+    TestHelper.RecordsBuilder customersWithNewFirstNameBuilder =
+        TestHelper.RecordsBuilder.newInstance(customerSchemaWithNewFirstName).add(0L, "Brown", null)
+            .add(1L, "Green", null).add(2L, "Pink", null).add(3L, "Red", "James");
+    List<Record> customersWithNewFirstName = customersWithNewFirstNameBuilder.build();
+
+    // Run a 'select *' from Hive and check if the first_name column is returned.
+    // It should be null for the old data and should be filled in the entry added after the column addition.
+    List<Object[]> rows = shell.executeStatement("SELECT * FROM default.customers");
+    HiveIcebergTestUtils.validateData(customersWithNewFirstName,
+        HiveIcebergTestUtils.valueForRow(customerSchemaWithNewFirstName, rows), 0);
+
+    Schema customerSchemaWithNewFirstNameOnly = new Schema(optional(1, "customer_id", Types.LongType.get()),
+        optional(3, "first_name", Types.StringType.get(), "This is the newly added first name"));
+
+    TestHelper.RecordsBuilder customersWithNewFirstNameOnlyBuilder = TestHelper.RecordsBuilder
+        .newInstance(customerSchemaWithNewFirstNameOnly).add(0L, null).add(1L, null).add(2L, null).add(3L, "James");
+    List<Record> customersWithNewFirstNameOnly = customersWithNewFirstNameOnlyBuilder.build();
+
+    // Run a 'select first_name' from Hive to check if the new first-name column can be queried.
+    rows = shell.executeStatement("SELECT customer_id, first_name FROM default.customers");
+    HiveIcebergTestUtils.validateData(customersWithNewFirstNameOnly,
+        HiveIcebergTestUtils.valueForRow(customerSchemaWithNewFirstNameOnly, rows), 0);
+
+  }
+
+  /**
+   * Checks if the certain type is an unsupported vectorized types in Hive 3.1.2
+   * @param type - data type
+   * @return - true if unsupported
+   */
+  private boolean isUnsupportedVectorizedTypeForHive(Type type) {
+    if (!isVectorized) {
+      return false;
+    }
+    switch (fileFormat) {
+      case PARQUET:
+        return Types.DecimalType.of(3, 1).equals(type) ||
+                type == Types.TimestampType.withoutZone() ||
+                type == Types.TimeType.get();
+      case ORC:
+        return type == Types.TimestampType.withZone() ||
+            type == Types.TimeType.get();
+      default:
+        return false;
+    }
   }
 
   private void testComplexTypeWrite(Schema schema, List<Record> records) throws IOException {

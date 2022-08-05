@@ -47,12 +47,14 @@ import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.flink.FlinkWriteConf;
 import org.apache.iceberg.flink.SimpleDataUtil;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.io.WriteResult;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
+import org.apache.iceberg.relocated.com.google.common.collect.Maps;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Types;
 import org.assertj.core.api.Assertions;
@@ -233,10 +235,6 @@ public class TestIcebergStreamWriter {
 
   @Test
   public void testTableWithTargetFileSize() throws Exception {
-    // TODO: ORC file does not support target file size before closed.
-    if (format == FileFormat.ORC) {
-      return;
-    }
     // Adjust the target-file-size in table properties.
     table.updateProperties()
         .set(TableProperties.WRITE_TARGET_FILE_SIZE_BYTES, "4") // ~4 bytes; low enough to trigger
@@ -340,7 +338,13 @@ public class TestIcebergStreamWriter {
   private OneInputStreamOperatorTestHarness<RowData, WriteResult> createIcebergStreamWriter(
       Table icebergTable, TableSchema flinkSchema) throws Exception {
     RowType flinkRowType = FlinkSink.toFlinkRowType(icebergTable.schema(), flinkSchema);
-    IcebergStreamWriter<RowData> streamWriter = FlinkSink.createStreamWriter(icebergTable, flinkRowType, null, false);
+    FlinkWriteConf flinkWriteConfig =
+        new FlinkWriteConf(icebergTable, Maps.newHashMap(), new org.apache.flink.configuration.Configuration());
+
+    IcebergStreamWriter<RowData> streamWriter = FlinkSink.createStreamWriter(
+        icebergTable,
+        flinkWriteConfig,
+        flinkRowType, null);
     OneInputStreamOperatorTestHarness<RowData, WriteResult> harness = new OneInputStreamOperatorTestHarness<>(
         streamWriter, 1, 1, 0);
 

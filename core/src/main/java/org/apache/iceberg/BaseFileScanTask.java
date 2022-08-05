@@ -29,7 +29,7 @@ import org.apache.iceberg.relocated.com.google.common.base.MoreObjects;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableList;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 
-class BaseFileScanTask implements FileScanTask {
+public class BaseFileScanTask implements FileScanTask {
   private final DataFile file;
   private final DeleteFile[] deletes;
   private final String schemaString;
@@ -38,7 +38,7 @@ class BaseFileScanTask implements FileScanTask {
 
   private transient PartitionSpec spec = null;
 
-  BaseFileScanTask(DataFile file, DeleteFile[] deletes, String schemaString, String specString,
+  public BaseFileScanTask(DataFile file, DeleteFile[] deletes, String schemaString, String specString,
                    ResidualEvaluator residuals) {
     this.file = file;
     this.deletes = deletes != null ? deletes : new DeleteFile[0];
@@ -84,7 +84,7 @@ class BaseFileScanTask implements FileScanTask {
   public Iterable<FileScanTask> split(long targetSplitSize) {
     if (file.format().isSplittable()) {
       if (file.splitOffsets() != null) {
-        return () -> new OffsetsAwareTargetSplitSizeScanTaskIterator(file.splitOffsets(), this, targetSplitSize);
+        return () -> new OffsetsAwareTargetSplitSizeScanTaskIterator(file.splitOffsets(), this);
       } else {
         return () -> new FixedSizeSplitScanTaskIterator(targetSplitSize, this);
       }
@@ -109,14 +109,11 @@ class BaseFileScanTask implements FileScanTask {
     private final List<Long> offsets;
     private final List<Long> splitSizes;
     private final FileScanTask parentScanTask;
-    private final long targetSplitSize;
     private int sizeIdx = 0;
 
-    OffsetsAwareTargetSplitSizeScanTaskIterator(
-        List<Long> offsetList, FileScanTask parentScanTask, long targetSplitSize) {
+    OffsetsAwareTargetSplitSizeScanTaskIterator(List<Long> offsetList, FileScanTask parentScanTask) {
       this.offsets = ImmutableList.copyOf(offsetList);
       this.parentScanTask = parentScanTask;
-      this.targetSplitSize = targetSplitSize;
       this.splitSizes = Lists.newArrayListWithCapacity(offsets.size());
       if (offsets.size() > 0) {
         int lastIndex = offsets.size() - 1;
@@ -139,13 +136,8 @@ class BaseFileScanTask implements FileScanTask {
       }
       int offsetIdx = sizeIdx;
       long currentSize = splitSizes.get(sizeIdx);
-      sizeIdx += 1; // always consume at least one file split
-      while (sizeIdx < splitSizes.size() && currentSize + splitSizes.get(sizeIdx) <= targetSplitSize) {
-        currentSize += splitSizes.get(sizeIdx);
-        sizeIdx += 1;
-      }
-      FileScanTask combinedTask = new SplitScanTask(offsets.get(offsetIdx), currentSize, parentScanTask);
-      return combinedTask;
+      sizeIdx += 1; // Create 1 split per offset
+      return new SplitScanTask(offsets.get(offsetIdx), currentSize, parentScanTask);
     }
 
   }
@@ -179,7 +171,7 @@ class BaseFileScanTask implements FileScanTask {
     }
   }
 
-  private static final class SplitScanTask implements FileScanTask {
+  private static final class SplitScanTask implements FileScanTask, MergeableScanTask<SplitScanTask> {
     private final long len;
     private final long offset;
     private final FileScanTask fileScanTask;
@@ -223,6 +215,22 @@ class BaseFileScanTask implements FileScanTask {
     @Override
     public Iterable<FileScanTask> split(long splitSize) {
       throw new UnsupportedOperationException("Cannot split a task which is already split");
+    }
+
+    @Override
+    public boolean canMerge(ScanTask other) {
+      if (other instanceof SplitScanTask) {
+        SplitScanTask that = (SplitScanTask) other;
+        return file().equals(that.file()) && offset + len == that.start();
+      } else {
+        return false;
+      }
+    }
+
+    @Override
+    public SplitScanTask merge(ScanTask other) {
+      SplitScanTask that = (SplitScanTask) other;
+      return new SplitScanTask(offset, len + that.length(), fileScanTask);
     }
   }
 }

@@ -19,18 +19,12 @@
 
 package org.apache.iceberg.actions;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableSet;
-import org.apache.iceberg.util.BinPacking;
-import org.apache.iceberg.util.BinPacking.ListPacker;
-import org.apache.iceberg.util.PropertyUtil;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import org.apache.iceberg.util.SortOrderUtil;
 
 /**
  * A rewrite strategy for data files which aims to reorder data with data files to optimally lay them out
@@ -46,21 +40,7 @@ import org.slf4j.LoggerFactory;
  * In the future other algorithms for determining files to rewrite will be provided.
  */
 public abstract class SortStrategy extends BinPackStrategy {
-  private static final Logger LOG = LoggerFactory.getLogger(SortStrategy.class);
 
-  /**
-   * Rewrites all files, regardless of their size. Defaults to false, rewriting only mis-sized
-   * files;
-   */
-  public static final String REWRITE_ALL = "rewrite-all";
-  public static final boolean REWRITE_ALL_DEFAULT = false;
-
-
-  private static final Set<String> validOptions = ImmutableSet.of(
-      REWRITE_ALL
-  );
-
-  private boolean rewriteAll;
   private SortOrder sortOrder;
 
   /**
@@ -69,7 +49,8 @@ public abstract class SortStrategy extends BinPackStrategy {
    * @return this for method chaining
    */
   public SortStrategy sortOrder(SortOrder order) {
-    this.sortOrder = order;
+    Preconditions.checkArgument(!order.isUnsorted(), "Cannot set strategy sort order: unsorted");
+    this.sortOrder = SortOrderUtil.buildSortOrder(table(), order);
     return this;
   }
 
@@ -86,7 +67,6 @@ public abstract class SortStrategy extends BinPackStrategy {
   public Set<String> validOptions() {
     return ImmutableSet.<String>builder()
         .addAll(super.validOptions())
-        .addAll(validOptions)
         .build();
   }
 
@@ -94,36 +74,12 @@ public abstract class SortStrategy extends BinPackStrategy {
   public RewriteStrategy options(Map<String, String> options) {
     super.options(options); // Also checks validity of BinPack options
 
-    rewriteAll = PropertyUtil.propertyAsBoolean(options,
-        REWRITE_ALL,
-        REWRITE_ALL_DEFAULT);
-
     if (sortOrder == null) {
       sortOrder = table().sortOrder();
     }
 
     validateOptions();
     return this;
-  }
-
-  @Override
-  public Iterable<FileScanTask> selectFilesToRewrite(Iterable<FileScanTask> dataFiles) {
-    if (rewriteAll) {
-      LOG.info("Sort Strategy for table {} set to rewrite all data files", table().name());
-      return dataFiles;
-    } else {
-      return super.selectFilesToRewrite(dataFiles);
-    }
-  }
-
-  @Override
-  public Iterable<List<FileScanTask>> planFileGroups(Iterable<FileScanTask> dataFiles) {
-    if (rewriteAll) {
-      ListPacker<FileScanTask> packer = new BinPacking.ListPacker<>(maxGroupSize(), 1, false);
-      return packer.pack(dataFiles, FileScanTask::length);
-    } else {
-      return super.planFileGroups(dataFiles);
-    }
   }
 
   protected void validateOptions() {

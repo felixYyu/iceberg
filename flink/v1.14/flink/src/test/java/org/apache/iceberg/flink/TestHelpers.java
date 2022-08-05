@@ -27,12 +27,16 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
+import org.apache.flink.core.memory.DataInputDeserializer;
+import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.table.data.ArrayData;
 import org.apache.flink.table.data.DecimalData;
 import org.apache.flink.table.data.MapData;
@@ -66,6 +70,16 @@ public class TestHelpers {
   private TestHelpers() {
   }
 
+  public static <T> T roundTripKryoSerialize(Class<T> clazz, T table) throws IOException {
+    KryoSerializer<T> kryo = new KryoSerializer<>(clazz, new ExecutionConfig());
+
+    DataOutputSerializer outputView = new DataOutputSerializer(1024);
+    kryo.serialize(table, outputView);
+
+    DataInputDeserializer inputView = new DataInputDeserializer(outputView.getCopyOfBuffer());
+    return kryo.deserialize(inputView);
+  }
+
   public static RowData copyRowData(RowData from, RowType rowType) {
     TypeSerializer[] fieldSerializers = rowType.getChildren().stream()
         .map((LogicalType type) -> InternalSerializers.create(type))
@@ -73,19 +87,23 @@ public class TestHelpers {
     return RowDataUtil.clone(from, null, rowType, fieldSerializers);
   }
 
-  public static List<RowData> readRowData(FlinkInputFormat inputFormat, RowType rowType) throws IOException {
-    FlinkInputSplit[] splits = inputFormat.createInputSplits(0);
-    List<RowData> results = Lists.newArrayList();
-
-    for (FlinkInputSplit s : splits) {
-      inputFormat.open(s);
-      while (!inputFormat.reachedEnd()) {
-        RowData row = inputFormat.nextRecord(null);
-        results.add(copyRowData(row, rowType));
+  public static void readRowData(FlinkInputFormat input, Consumer<RowData> visitor) throws IOException {
+    for (FlinkInputSplit s : input.createInputSplits(0)) {
+      input.open(s);
+      try {
+        while (!input.reachedEnd()) {
+          RowData row = input.nextRecord(null);
+          visitor.accept(row);
+        }
+      } finally {
+        input.close();
       }
     }
-    inputFormat.close();
+  }
 
+  public static List<RowData> readRowData(FlinkInputFormat inputFormat, RowType rowType) throws IOException {
+    List<RowData> results = Lists.newArrayList();
+    readRowData(inputFormat, row -> results.add(copyRowData(row, rowType)));
     return results;
   }
 
@@ -111,10 +129,12 @@ public class TestHelpers {
     assertRows(results, expected);
   }
 
+  public static void assertRows(List<RowData> results, List<RowData> expected, RowType rowType) {
+    assertRows(convertRowDataToRow(results, rowType), convertRowDataToRow(expected, rowType));
+  }
+
   public static void assertRows(List<Row> results, List<Row> expected) {
-    expected.sort(Comparator.comparing(Row::toString));
-    results.sort(Comparator.comparing(Row::toString));
-    Assert.assertEquals(expected, results);
+    Assertions.assertThat(results).containsExactlyInAnyOrderElementsOf(expected);
   }
 
   public static void assertRowData(Schema schema, StructLike expected, RowData actual) {

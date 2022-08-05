@@ -244,6 +244,10 @@ public class SparkTable implements org.apache.spark.sql.connector.catalog.Table,
 
   @Override
   public void deleteWhere(Filter[] filters) {
+    Preconditions.checkArgument(
+        snapshotId == null,
+        "Cannot delete from table at a specific snapshot: %s", snapshotId);
+
     Expression deleteExpr = SparkFilters.convert(filters);
 
     if (deleteExpr == Expressions.alwaysFalse()) {
@@ -251,14 +255,10 @@ public class SparkTable implements org.apache.spark.sql.connector.catalog.Table,
       return;
     }
 
-    try {
-      icebergTable.newDelete()
-          .set("spark.app.id", sparkSession().sparkContext().applicationId())
-          .deleteFromRowFilter(deleteExpr)
-          .commit();
-    } catch (ValidationException e) {
-      throw new IllegalArgumentException("Failed to cleanly delete data files matching: " + deleteExpr, e);
-    }
+    icebergTable.newDelete()
+        .set("spark.app.id", sparkSession().sparkContext().applicationId())
+        .deleteFromRowFilter(deleteExpr)
+        .commit();
   }
 
   @Override

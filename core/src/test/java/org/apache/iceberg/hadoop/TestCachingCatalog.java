@@ -19,11 +19,17 @@
 
 package org.apache.iceberg.hadoop;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.iceberg.AssertHelpers;
 import org.apache.iceberg.CachingCatalog;
 import org.apache.iceberg.CatalogProperties;
@@ -35,6 +41,7 @@ import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.catalog.Namespace;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.util.FakeTicker;
 import org.assertj.core.api.Assertions;
 import org.junit.After;
@@ -258,6 +265,47 @@ public class TestCachingCatalog extends HadoopTableTestBase {
   }
 
   @Test
+  public void testDeadlock() throws IOException, InterruptedException {
+    HadoopCatalog underlyingCatalog = hadoopCatalog();
+    TestableCachingCatalog catalog = TestableCachingCatalog.wrap(underlyingCatalog, Duration.ofSeconds(1), ticker);
+    Namespace namespace = Namespace.of("db", "ns1", "ns2");
+    int numThreads = 20;
+    List<TableIdentifier> createdTables = Lists.newArrayList();
+    for (int i = 0; i < numThreads; i++) {
+      TableIdentifier tableIdent = TableIdentifier.of(namespace, "tbl" + i);
+      catalog.createTable(tableIdent, SCHEMA, SPEC, ImmutableMap.of("key", "value"));
+      createdTables.add(tableIdent);
+    }
+
+    Cache<TableIdentifier, Table> cache = catalog.cache();
+    AtomicInteger cacheGetCount = new AtomicInteger(0);
+    AtomicInteger cacheCleanupCount = new AtomicInteger(0);
+    ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+    for (int i = 0; i < numThreads; i++) {
+      if (i % 2 == 0) {
+        String table = "tbl" + i;
+        executor.submit(() -> {
+          ticker.advance(Duration.ofSeconds(2));
+          cache.get(TableIdentifier.of(namespace, table), underlyingCatalog::loadTable);
+          cacheGetCount.incrementAndGet();
+        });
+      } else {
+        executor.submit(() -> {
+          ticker.advance(Duration.ofSeconds(2));
+          cache.cleanUp();
+          cacheCleanupCount.incrementAndGet();
+        });
+      }
+    }
+    executor.awaitTermination(2, TimeUnit.SECONDS);
+    Assertions.assertThat(cacheGetCount).hasValue(numThreads / 2);
+    Assertions.assertThat(cacheCleanupCount).hasValue(numThreads / 2);
+
+    executor.shutdown();
+    createdTables.forEach(table -> catalog.dropTable(table, true));
+  }
+
+  @Test
   public void testCachingCatalogRejectsExpirationIntervalOfZero() {
     AssertHelpers
         .assertThrows(
@@ -274,6 +322,19 @@ public class TestCachingCatalog extends HadoopTableTestBase {
     Assert.assertFalse(
         "When a negative value is used as the expiration interval, the cache should not expire entries based on a TTL",
         catalog.isCacheExpirationEnabled());
+  }
+
+  @Test
+  public void testInvalidateTableForChainedCachingCatalogs() throws Exception {
+    TestableCachingCatalog wrappedCatalog = TestableCachingCatalog.wrap(hadoopCatalog(), EXPIRATION_TTL, ticker);
+    TestableCachingCatalog catalog = TestableCachingCatalog.wrap(wrappedCatalog, EXPIRATION_TTL, ticker);
+    Namespace namespace = Namespace.of("db", "ns1", "ns2");
+    TableIdentifier tableIdent = TableIdentifier.of(namespace, "tbl");
+    catalog.createTable(tableIdent, SCHEMA, SPEC, ImmutableMap.of("key2", "value2"));
+    Assertions.assertThat(catalog.cache().asMap()).containsKey(tableIdent);
+    catalog.invalidateTable(tableIdent);
+    Assertions.assertThat(catalog.cache().asMap()).doesNotContainKey(tableIdent);
+    Assertions.assertThat(wrappedCatalog.cache().asMap()).doesNotContainKey(tableIdent);
   }
 
   public static TableIdentifier[] metadataTables(TableIdentifier tableIdent) {
